@@ -1,0 +1,2555 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta content="width=device-width, initial-scale=1.0" name="viewport" />
+    <title>论译 RapidPaperTrans</title>
+    <style>
+        /* CSS Reset and Base Styles */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f8fafb;
+            color: #4a5568;
+        }
+
+        /* Main App Container */
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Header Section - 淡雅清新风格 */
+        .header {
+            background: linear-gradient(135deg, #e8f4f8 0%, #d4e8ed 100%);
+            color: #2d6a7a;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+            flex-shrink: 0;
+            border-bottom: 1px solid #c8dce3;
+        }
+
+        .header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #2d6a7a;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        /* arXiv Search in Header */
+        .arxiv-search {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            margin-right: 10px;
+        }
+
+        .arxiv-search input {
+            padding: 8px 12px;
+            border: 1px solid #c8dce3;
+            border-radius: 6px;
+            font-size: 13px;
+            background: rgba(255, 255, 255, 0.85);
+            color: #2d6a7a;
+            transition: all 0.2s;
+            min-width: 180px;
+        }
+
+        .arxiv-search input:focus {
+            outline: none;
+            border-color: #7eb8c9;
+            background: #ffffff;
+            box-shadow: 0 0 0 2px rgba(126, 184, 201, 0.15);
+        }
+
+        .arxiv-search input::placeholder {
+            color: #88a6b0;
+        }
+
+        .btn-search {
+            padding: 8px 14px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-weight: 500;
+        }
+
+        .btn-search:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 10px rgba(90, 154, 173, 0.35);
+        }
+
+        .btn-search:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .search-icon {
+            font-size: 14px;
+        }
+
+        /* Input Section */
+        .input-section {
+            background: #ffffff;
+            padding: 15px 20px;
+            border-bottom: 1px solid #e2e8f0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            flex-shrink: 0;
+        }
+
+        .input-section input[type="text"] {
+            flex: 1;
+            min-width: 300px;
+            padding: 10px 15px;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fafcfd;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .input-section input[type="text"]:focus {
+            outline: none;
+            border-color: #7eb8c9;
+            box-shadow: 0 0 0 3px rgba(126, 184, 201, 0.15);
+            background: #ffffff;
+        }
+
+        .input-section input[type="text"]::placeholder {
+            color: #a0aec0;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(90, 154, 173, 0.35);
+        }
+
+        .btn-primary:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .btn-secondary {
+            background: #f0f5f7;
+            color: #4a6572;
+            border: 1px solid #d1dce5;
+        }
+
+        .btn-secondary:hover {
+            background: #e5eef2;
+            border-color: #b8c9d1;
+        }
+
+        /* PDF Viewer Container */
+        .pdf-container {
+            display: flex;
+            flex: 1;
+            gap: 8px;
+            padding: 12px;
+            background: linear-gradient(180deg, #eef3f6 0%, #e4ebef 100%);
+            overflow: hidden;
+        }
+
+        /* PDF Panel (Left and Right) */
+        .pdf-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #ffffff;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+            overflow: hidden;
+            min-width: 0;
+            border: 1px solid #e2e8f0;
+        }
+
+        .pdf-panel-header {
+            padding: 10px 15px;
+            background: #fafcfd;
+            border-bottom: 1px solid #e8eff3;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-shrink: 0;
+        }
+
+        .pdf-panel-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #5a7080;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pdf-panel-title .icon {
+            width: 18px;
+            height: 18px;
+            color: #7eb8c9;
+        }
+
+        .pdf-panel-left .pdf-panel-header {
+            border-left: 3px solid #81c995;
+        }
+
+        .pdf-panel-right .pdf-panel-header {
+            border-left: 3px solid #7eb8c9;
+        }
+
+        /* Download Translated PDF Button */
+        .btn-download-translated {
+            padding: 6px 12px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .btn-download-translated:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(90, 154, 173, 0.35);
+        }
+
+        .btn-download-translated:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* PDF Iframe Container */
+        .pdf-iframe-container {
+            flex: 1;
+            position: relative;
+            background: #f8fafb;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .pdf-iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+
+        /* Placeholder when no PDF is loaded */
+        .pdf-placeholder {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            color: #a0b0bc;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .pdf-placeholder .placeholder-icon {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+            opacity: 0.4;
+            color: #b8c9d1;
+        }
+
+        .pdf-placeholder p {
+            font-size: 14px;
+            line-height: 1.6;
+            color: #8a9caa;
+        }
+
+        /* Status Bar - 淡雅风格 */
+        .status-bar {
+            background: linear-gradient(135deg, #f0f5f7 0%, #e8eff3 100%);
+            color: #5a7080;
+            padding: 8px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 13px;
+            flex-shrink: 0;
+            border-top: 1px solid #d1dce5;
+        }
+
+        .status-left {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #b8c9d1;
+        }
+
+        .status-dot.idle {
+            background: #b8c9d1;
+        }
+
+        .status-dot.processing {
+            background: #f0b429;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-dot.success {
+            background: #81c995;
+        }
+
+        .status-dot.error {
+            background: #e57373;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .status-message {
+            color: #6b8090;
+        }
+
+        .status-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            color: #7a8f9c;
+        }
+
+        .status-phase {
+            padding: 3px 10px;
+            background: #e0eaef;
+            border-radius: 12px;
+            font-size: 12px;
+            color: #5a7a8a;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            max-width: 300px;
+            margin-left: 20px;
+        }
+
+        .progress-container.visible {
+            display: flex;
+        }
+
+        .progress-bar {
+            flex: 1;
+            height: 4px;
+            background: #d1dce5;
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #7eb8c9, #5a9aad);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            font-size: 12px;
+            color: #6b8090;
+            min-width: 40px;
+            text-align: right;
+        }
+
+        /* Settings Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(90, 122, 138, 0.3);
+            backdrop-filter: blur(2px);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.visible {
+            display: flex;
+        }
+
+        .modal {
+            background: #ffffff;
+            border-radius: 14px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+            width: 90%;
+            max-width: 500px;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #e2e8f0;
+        }
+
+        .modal-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid #e8eff3;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: #fafcfd;
+        }
+
+        .modal-header h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: #3d5a6c;
+            margin: 0;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+            color: #a0b0bc;
+            padding: 0;
+            line-height: 1;
+        }
+
+        .modal-close:hover {
+            color: #5a7080;
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            background: #ffffff;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            color: #4a6572;
+            margin-bottom: 8px;
+        }
+
+        .form-group input[type="text"],
+        .form-group input[type="password"],
+        .form-group input[type="number"],
+        .form-group select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fafcfd;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #7eb8c9;
+            box-shadow: 0 0 0 3px rgba(126, 184, 201, 0.15);
+            background: #ffffff;
+        }
+
+        .form-group .hint {
+            font-size: 12px;
+            color: #8a9caa;
+            margin-top: 6px;
+        }
+
+        .input-with-button {
+            display: flex;
+            gap: 8px;
+        }
+
+        .input-with-button input {
+            flex: 1;
+        }
+
+        .btn-small {
+            padding: 8px 12px;
+            font-size: 14px;
+        }
+
+        .modal-footer {
+            padding: 16px 24px;
+            border-top: 1px solid #e8eff3;
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+            background: #fafcfd;
+        }
+
+        .test-connection {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding-top: 10px;
+            border-top: 1px solid #e8eff3;
+            margin-top: 10px;
+        }
+
+        .test-status {
+            font-size: 13px;
+        }
+
+        .test-status.success {
+            color: #81c995;
+        }
+
+        .test-status.error {
+            color: #e57373;
+        }
+
+        .test-status.testing {
+            color: #f0b429;
+        }
+
+        .test-status.warning {
+            color: #f0b429;
+        }
+
+        /* Toast Notification */
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 2000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .toast {
+            padding: 12px 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            animation: slideIn 0.3s ease;
+            max-width: 400px;
+        }
+
+        .toast.success {
+            background: linear-gradient(135deg, #81c995 0%, #6bb380 100%);
+            color: white;
+        }
+
+        .toast.error {
+            background: linear-gradient(135deg, #e57373 0%, #d45d5d 100%);
+            color: white;
+        }
+
+        .toast.warning {
+            background: linear-gradient(135deg, #f0b429 0%, #e0a020 100%);
+            color: white;
+        }
+
+        .toast.info {
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        @keyframes slideOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+        }
+
+        .toast.hiding {
+            animation: slideOut 0.3s ease forwards;
+        }
+
+        /* Download Dropdown */
+        .dropdown {
+            position: relative;
+            display: inline-block;
+        }
+
+        .dropdown-toggle {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .dropdown-toggle::after {
+            content: '▼';
+            font-size: 10px;
+        }
+
+        .dropdown-menu {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            background: #ffffff;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+            min-width: 180px;
+            z-index: 100;
+            margin-top: 4px;
+        }
+
+        .dropdown-menu.show {
+            display: block;
+        }
+
+        .dropdown-item {
+            display: block;
+            width: 100%;
+            padding: 10px 15px;
+            border: none;
+            background: none;
+            text-align: left;
+            cursor: pointer;
+            font-size: 14px;
+            color: #4a6572;
+        }
+
+        .dropdown-item:hover {
+            background: #f0f5f7;
+        }
+
+        .dropdown-item:first-child {
+            border-radius: 8px 8px 0 0;
+        }
+
+        .dropdown-item:last-child {
+            border-radius: 0 0 8px 8px;
+        }
+
+        .dropdown-item:disabled {
+            color: #a0b0bc;
+            cursor: not-allowed;
+        }
+
+        /* About Modal Styles */
+        .about-modal {
+            max-width: 360px;
+            text-align: center;
+        }
+
+        .about-body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 30px 24px;
+        }
+
+        .about-logo {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+
+        .about-title {
+            font-size: 28px;
+            font-weight: 700;
+            color: #3d5a6c;
+            margin: 0;
+        }
+
+        .about-subtitle {
+            font-size: 16px;
+            color: #7eb8c9;
+            margin: 4px 0 4px 0;
+            font-weight: 500;
+        }
+
+        .about-slogan {
+            font-size: 13px;
+            color: #888;
+            font-style: italic;
+            margin: 0 0 8px 0;
+        }
+
+        .about-version {
+            font-size: 14px;
+            color: #8a9caa;
+            margin: 0;
+        }
+
+        .about-divider {
+            width: 60px;
+            height: 2px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            margin: 20px 0;
+            border-radius: 1px;
+        }
+
+        .about-description {
+            font-size: 14px;
+            color: #5a7080;
+            line-height: 1.6;
+            margin: 0 0 16px 0;
+        }
+
+        .about-author {
+            font-size: 13px;
+            color: #888;
+        }
+
+        .about-github {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 16px;
+            padding: 8px 16px;
+            background: #24292e;
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+
+        .about-github:hover {
+            background: #444d56;
+        }
+
+        .about-modal .modal-footer {
+            justify-content: center;
+        }
+
+        /* Results Management Modal Styles */
+        .results-modal {
+            max-width: 600px;
+        }
+
+        .results-intro {
+            font-size: 14px;
+            color: #6b8090;
+            margin-bottom: 16px;
+        }
+
+        .results-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .results-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0b0bc;
+        }
+
+        .results-empty .empty-icon {
+            font-size: 48px;
+            display: block;
+            margin-bottom: 12px;
+        }
+
+        .results-empty p {
+            font-size: 14px;
+        }
+
+        .paper-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 15px;
+            background: #fafcfd;
+            border: 1px solid #e8eff3;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            transition: all 0.2s;
+        }
+
+        .paper-item:hover {
+            border-color: #7eb8c9;
+            background: #f5f9fb;
+        }
+
+        .paper-icon {
+            font-size: 24px;
+            flex-shrink: 0;
+        }
+
+        .paper-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .paper-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: #3d5a6c;
+            margin-bottom: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .paper-meta {
+            font-size: 12px;
+            color: #8a9caa;
+            display: flex;
+            gap: 12px;
+        }
+
+        .paper-arxiv-id {
+            font-family: monospace;
+            background: #e8eff3;
+            padding: 1px 6px;
+            border-radius: 4px;
+        }
+
+        .paper-actions {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
+        }
+
+        .paper-btn {
+            padding: 6px 10px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .paper-btn-view {
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+        }
+
+        .paper-btn-view:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(90, 154, 173, 0.35);
+        }
+
+        .paper-btn-retranslate {
+            background: #f0f5f7;
+            color: #5a7080;
+            border: 1px solid #d1dce5;
+        }
+
+        .paper-btn-retranslate:hover {
+            background: #e5eef2;
+            border-color: #b8c9d1;
+        }
+
+        .paper-btn-delete {
+            background: #fef5f5;
+            color: #e57373;
+            border: 1px solid #f5d0d0;
+        }
+
+        .paper-btn-delete:hover {
+            background: #fde8e8;
+            border-color: #e57373;
+        }
+
+        .paper-btn-continue {
+            background: linear-gradient(135deg, #81c784 0%, #66bb6a 100%);
+            color: white;
+        }
+
+        .paper-btn-continue:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(102, 187, 106, 0.35);
+        }
+
+        /* Error Management Modal Styles */
+        .errors-modal {
+            max-width: 700px;
+        }
+
+        .errors-intro {
+            font-size: 14px;
+            color: #6b8090;
+            margin-bottom: 16px;
+        }
+
+        .errors-list {
+            max-height: 450px;
+            overflow-y: auto;
+        }
+
+        .errors-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #a0b0bc;
+        }
+
+        .errors-empty .empty-icon {
+            font-size: 48px;
+            display: block;
+            margin-bottom: 12px;
+        }
+
+        .errors-empty p {
+            font-size: 14px;
+        }
+
+        .error-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 14px 16px;
+            background: #fff8f8;
+            border: 1px solid #ffd0d0;
+            border-left: 4px solid #e57373;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+
+        .error-item:hover {
+            border-color: #ffb0b0;
+            background: #fff5f5;
+            box-shadow: 0 2px 8px rgba(229, 115, 115, 0.15);
+        }
+
+        .error-icon {
+            font-size: 24px;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+
+        .error-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .error-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 6px;
+        }
+
+        .error-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #3d5a6c;
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .error-stage {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background: #e57373;
+            color: white;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+
+        .error-message {
+            font-size: 13px;
+            color: #d32f2f;
+            margin-bottom: 8px;
+            line-height: 1.5;
+            background: #ffffff;
+            padding: 8px 10px;
+            border-radius: 6px;
+            border: 1px solid #ffd0d0;
+            max-height: 60px;
+            overflow-y: auto;
+        }
+
+        .error-meta {
+            font-size: 12px;
+            color: #8a9caa;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+
+        .error-arxiv-id {
+            font-family: monospace;
+            background: #e8eff3;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        .error-time {
+            color: #a0b0bc;
+        }
+
+        .error-retry-count {
+            color: #ff9800;
+            font-weight: 500;
+        }
+
+        .error-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .error-btn {
+            padding: 7px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .error-btn-retry {
+            background: linear-gradient(135deg, #81c784 0%, #66bb6a 100%);
+            color: white;
+        }
+
+        .error-btn-retry:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 10px rgba(102, 187, 106, 0.35);
+        }
+
+        .error-btn-retry:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .error-btn-clear {
+            background: #f0f5f7;
+            color: #5a7080;
+            border: 1px solid #d1dce5;
+        }
+
+        .error-btn-clear:hover {
+            background: #e5eef2;
+            border-color: #b8c9d1;
+        }
+
+        #btn-clear-all-errors {
+            background: #fef5f5;
+            color: #e57373;
+            border: 1px solid #f5d0d0;
+        }
+
+        #btn-clear-all-errors:hover {
+            background: #fde8e8;
+            border-color: #e57373;
+        }
+
+        #btn-export-errors {
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+        }
+
+        #btn-export-errors:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 10px rgba(90, 154, 173, 0.35);
+        }
+
+        #btn-export-error-ids {
+            background: linear-gradient(135deg, #9575cd 0%, #7e57c2 100%);
+            color: white;
+        }
+
+        #btn-export-error-ids:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 3px 10px rgba(126, 87, 194, 0.35);
+        }
+
+        /* Paper status styles */
+        .paper-status {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 500;
+        }
+
+        .status-complete {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .status-pending {
+            background: #fff3e0;
+            color: #ef6c00;
+        }
+
+        .paper-error {
+            font-size: 11px;
+            color: #c62828;
+            margin-top: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* Settings Section Title */
+        .settings-section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #5a7080;
+            margin: 24px 0 16px 0;
+            padding-top: 16px;
+            border-top: 1px solid #e8eff3;
+        }
+
+        /* Share Modal Styles */
+        .share-modal {
+            max-width: 450px;
+        }
+
+        .share-intro {
+            font-size: 14px;
+            color: #6b8090;
+            margin-bottom: 16px;
+        }
+
+        .share-files {
+            margin-bottom: 16px;
+        }
+
+        .share-file-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 15px;
+            background: #fafcfd;
+            border: 1px solid #e8eff3;
+            border-radius: 8px;
+            margin-bottom: 8px;
+        }
+
+        .share-file-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .share-file-item label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 1;
+            cursor: pointer;
+        }
+
+        .share-file-item .file-icon {
+            font-size: 20px;
+        }
+
+        .share-file-item .file-name {
+            flex: 1;
+            font-size: 14px;
+            color: #3d5a6c;
+        }
+
+        .share-file-item .file-status {
+            font-size: 12px;
+            padding: 2px 8px;
+            border-radius: 4px;
+        }
+
+        .share-file-item .file-status.exists {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .share-file-item .file-status.new {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .share-warning {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 15px;
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            margin-bottom: 16px;
+        }
+
+        .share-warning .warning-icon {
+            font-size: 18px;
+        }
+
+        .share-warning .warning-text {
+            font-size: 13px;
+            color: #856404;
+        }
+
+        .share-progress {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 15px;
+            background: #e8f4f8;
+            border-radius: 8px;
+        }
+
+        .share-progress .progress-icon {
+            animation: spin 1s linear infinite;
+        }
+
+        .share-progress .progress-text {
+            font-size: 14px;
+            color: #5a9aad;
+        }
+
+        /* GitHub Download Modal Styles */
+        .download-modal {
+            max-width: 500px;
+        }
+
+        .download-intro {
+            margin-bottom: 20px;
+        }
+
+        .arxiv-id-display {
+            display: block;
+            font-size: 16px;
+            font-weight: 600;
+            color: #2c5f75;
+            margin-bottom: 8px;
+        }
+
+        .download-hint {
+            display: block;
+            font-size: 14px;
+            color: #6b8090;
+        }
+
+        .download-files {
+            margin-bottom: 16px;
+        }
+
+        .download-file-item {
+            display: flex;
+            align-items: center;
+            padding: 12px;
+            border: 1px solid #e0e7eb;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            transition: all 0.2s;
+        }
+
+        .download-file-item:hover {
+            background: #f8fafb;
+            border-color: #7eb8c9;
+        }
+
+        .download-file-item input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        .download-file-item label {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex: 1;
+            cursor: pointer;
+        }
+
+        .download-file-item .file-icon {
+            font-size: 24px;
+        }
+
+        .download-file-item .file-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            flex: 1;
+        }
+
+        .download-file-item .file-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: #2c5f75;
+        }
+
+        .download-file-item .file-name {
+            font-size: 12px;
+            color: #88a6b0;
+            font-family: 'Courier New', monospace;
+        }
+
+        .download-progress {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px 15px;
+            background: #e8f4f8;
+            border-radius: 8px;
+        }
+
+        .download-progress .progress-icon {
+            animation: spin 1s linear infinite;
+        }
+
+        .download-progress .progress-text {
+            font-size: 14px;
+            color: #5a9aad;
+        }
+
+        /* Startup Check Modal Styles */
+        .startup-check-modal {
+            max-width: 450px;
+        }
+
+        .startup-check-intro {
+            font-size: 14px;
+            color: #5a7080;
+            margin-bottom: 20px;
+        }
+
+        .check-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 15px;
+            padding: 15px;
+            background: #fafcfd;
+            border-radius: 10px;
+            margin-bottom: 12px;
+            border: 1px solid #e8eff3;
+        }
+
+        .check-item.success {
+            border-color: #81c995;
+            background: #f0faf3;
+        }
+
+        .check-item.error {
+            border-color: #e57373;
+            background: #fef5f5;
+        }
+
+        .check-icon {
+            font-size: 24px;
+            min-width: 32px;
+            text-align: center;
+        }
+
+        .check-spinner {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+
+        @keyframes spin {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .check-content {
+            flex: 1;
+        }
+
+        .check-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #3d5a6c;
+            margin-bottom: 4px;
+        }
+
+        .check-detail {
+            font-size: 13px;
+            color: #6b8090;
+        }
+
+        .check-action {
+            margin-top: 10px;
+        }
+
+        .download-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+
+        .download-link:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(90, 154, 173, 0.35);
+        }
+
+        /* Mode Switch Tabs */
+        .mode-switch-container {
+            background: #ffffff;
+            padding: 0 20px;
+            border-bottom: 1px solid #e2e8f0;
+            flex-shrink: 0;
+        }
+
+        .mode-switch-tabs {
+            display: flex;
+            gap: 0;
+        }
+
+        .mode-tab {
+            padding: 12px 24px;
+            border: none;
+            background: transparent;
+            font-size: 14px;
+            font-weight: 500;
+            color: #6b8090;
+            cursor: pointer;
+            position: relative;
+            transition: all 0.2s;
+            border-bottom: 2px solid transparent;
+        }
+
+        .mode-tab:hover {
+            color: #4a6572;
+            background: #f8fafb;
+        }
+
+        .mode-tab.active {
+            color: #5a9aad;
+            border-bottom-color: #5a9aad;
+        }
+
+        .mode-tab .tab-icon {
+            margin-right: 8px;
+        }
+
+        /* PDF Input Section (for PDF mode) */
+        .pdf-input-section {
+            display: none;
+            background: #ffffff;
+            padding: 20px;
+            border-bottom: 1px solid #e2e8f0;
+            flex-shrink: 0;
+        }
+
+        .pdf-input-section.visible {
+            display: block;
+        }
+
+        .pdf-drop-zone {
+            border: 2px dashed #d1dce5;
+            border-radius: 12px;
+            padding: 40px 20px;
+            text-align: center;
+            background: #fafcfd;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .pdf-drop-zone:hover {
+            border-color: #7eb8c9;
+            background: #f5f9fb;
+        }
+
+        .pdf-drop-zone.drag-over {
+            border-color: #5a9aad;
+            background: #e8f4f8;
+            border-style: solid;
+        }
+
+        .pdf-drop-zone .drop-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.6;
+        }
+
+        .pdf-drop-zone .drop-text {
+            font-size: 16px;
+            color: #5a7080;
+            margin-bottom: 8px;
+        }
+
+        .pdf-drop-zone .drop-hint {
+            font-size: 13px;
+            color: #8a9caa;
+            margin-bottom: 16px;
+        }
+
+        .pdf-drop-zone .btn-select-pdf {
+            padding: 10px 24px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .pdf-drop-zone .btn-select-pdf:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(90, 154, 173, 0.35);
+        }
+
+        /* Selected PDF File Display */
+        .pdf-file-selected {
+            display: none;
+            align-items: center;
+            gap: 15px;
+            padding: 15px 20px;
+            background: #f0faf3;
+            border: 1px solid #81c995;
+            border-radius: 10px;
+            margin-top: 15px;
+        }
+
+        .pdf-file-selected.visible {
+            display: flex;
+        }
+
+        .pdf-file-icon {
+            font-size: 32px;
+        }
+
+        .pdf-file-info {
+            flex: 1;
+        }
+
+        .pdf-file-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: #3d5a6c;
+            margin-bottom: 4px;
+            word-break: break-all;
+        }
+
+        .pdf-file-size {
+            font-size: 12px;
+            color: #6b8090;
+        }
+
+        .pdf-file-actions {
+            display: flex;
+            gap: 10px;
+        }
+
+        .btn-clear-pdf {
+            padding: 6px 12px;
+            background: #f0f5f7;
+            color: #5a7080;
+            border: 1px solid #d1dce5;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-clear-pdf:hover {
+            background: #e5eef2;
+            border-color: #b8c9d1;
+        }
+
+        .btn-translate-pdf {
+            padding: 6px 16px;
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-translate-pdf:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(90, 154, 173, 0.35);
+        }
+
+        .btn-translate-pdf:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 900px) {
+            .pdf-container {
+                flex-direction: column;
+            }
+
+            .pdf-panel {
+                min-height: 300px;
+            }
+
+            .input-section {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .input-section input[type="text"] {
+                min-width: auto;
+            }
+
+            .status-bar {
+                flex-wrap: wrap;
+                gap: 10px;
+            }
+
+            .status-right {
+                width: 100%;
+                justify-content: flex-end;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .header h1 {
+                font-size: 1rem;
+            }
+
+            .pdf-panel-header {
+                padding: 8px 12px;
+            }
+
+            .pdf-panel-title {
+                font-size: 12px;
+            }
+
+            .status-bar {
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+        }
+
+        /* Browse Library Modal */
+        .library-modal {
+            max-width: 900px;
+            max-height: 80vh;
+        }
+
+        .library-loading {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6b8090;
+        }
+
+        .loading-spinner {
+            font-size: 24px;
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        .library-content {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+
+        .library-list {
+            max-height: 500px;
+            overflow-y: auto;
+            overflow-x: visible;
+            padding: 5px 0;
+            position: relative;
+        }
+
+        .library-pagination {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 15px 0;
+            border-top: 1px solid #e5eef2;
+        }
+
+        .pagination-btn {
+            padding: 6px 12px;
+            background: #f8fafb;
+            border: 1px solid #d1dce5;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .pagination-btn:hover:not(:disabled) {
+            background: #e8f4f8;
+            border-color: #7eb8c9;
+        }
+
+        .pagination-btn:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .pagination-info {
+            font-size: 14px;
+            color: #3d5a6c;
+            font-weight: 500;
+            margin: 0 10px;
+        }
+
+        .pagination-info span {
+            color: #5a9aad;
+            font-weight: 600;
+        }
+
+        .pagination-total {
+            font-size: 13px;
+            color: #6b8090;
+            margin-left: 15px;
+            padding-left: 15px;
+            border-left: 1px solid #d1dce5;
+        }
+
+        .pagination-total span {
+            color: #5a9aad;
+            font-weight: 600;
+        }
+
+        .library-paper-item {
+            padding: 10px 12px;
+            margin-bottom: 6px;
+            background: #f8fafb;
+            border: 1px solid #e5eef2;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+            z-index: 1;
+        }
+
+        .library-paper-item:hover {
+            background: #f0f7fa;
+            border-color: #7eb8c9;
+            transform: translateX(5px);
+            box-shadow: 0 2px 8px rgba(90, 154, 173, 0.15);
+            z-index: 1001;
+        }
+
+        .library-paper-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .library-paper-arxiv {
+            font-size: 12px;
+            font-weight: 600;
+            color: #5a9aad;
+            font-family: 'Courier New', monospace;
+        }
+
+        .library-paper-title {
+            font-size: 13px;
+            font-weight: 500;
+            color: #3d5a6c;
+            line-height: 1.3;
+            margin-bottom: 5px;
+        }
+
+        .library-paper-files {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+
+        .library-file-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 2px 6px;
+            background: #e8f4f8;
+            color: #5a9aad;
+            border-radius: 3px;
+            font-size: 10px;
+            font-weight: 500;
+        }
+
+        .library-paper-abstract {
+            position: fixed;
+            background: white;
+            border: 1px solid #7eb8c9;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            z-index: 10000;
+            display: none;
+            max-width: 600px;
+            pointer-events: none;
+        }
+
+        .library-paper-item:hover .library-paper-abstract {
+            display: block;
+        }
+
+        .library-abstract-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #5a9aad;
+            margin-bottom: 8px;
+        }
+
+        .library-abstract-content {
+            font-size: 12px;
+            color: #3d5a6c;
+            line-height: 1.5;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .library-empty {
+            text-align: center;
+            padding: 40px 20px;
+            color: #6b8090;
+        }
+
+        /* Translate Confirm Modal */
+        .translate-confirm-modal {
+            max-width: 500px;
+        }
+
+        .translate-confirm-intro {
+            font-size: 14px;
+            color: #6b8090;
+            margin-bottom: 16px;
+        }
+
+        .paper-preview {
+            background: #fafcfd;
+            border: 1px solid #e8eff3;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .paper-preview-item {
+            display: flex;
+            margin-bottom: 12px;
+        }
+
+        .paper-preview-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .preview-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: #5a7080;
+            min-width: 80px;
+            flex-shrink: 0;
+        }
+
+        .preview-value {
+            font-size: 13px;
+            color: #3d5a6c;
+            word-break: break-word;
+        }
+
+        .preview-title {
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        .preview-authors {
+            color: #6b8090;
+            font-style: italic;
+        }
+
+        .translate-confirm-question {
+            font-size: 15px;
+            font-weight: 500;
+            color: #3d5a6c;
+            text-align: center;
+            margin: 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <h1>极速论译，神形合一</h1>
+            <div class="header-controls">
+                <!-- arXiv Search Box -->
+                <div class="arxiv-search">
+                    <input type="text" id="arxiv-search-input" placeholder="输入 arXiv ID 搜索已翻译..." autocomplete="off"
+                        title="搜索GitHub上已有的翻译" />
+                    <button class="btn-search" id="btn-arxiv-search" title="在GitHub搜索已翻译论文">
+                        <span class="search-icon">🔍</span>搜索
+                    </button>
+                    <button class="btn-search" id="btn-browse-library" title="浏览GitHub共享库">
+                        <span class="search-icon">📚</span>浏览共享库
+                    </button>
+                </div>
+                <button class="btn btn-secondary" id="btn-share" title="分享到GitHub" style="display: none;">🔗 分享</button>
+                <button class="btn btn-secondary" id="btn-results" title="结果管理">📚 结果管理</button>
+                <button class="btn btn-secondary" id="btn-errors" title="错误管理">⚠️ 错误</button>
+                <button class="btn btn-secondary" id="btn-settings" title="设置">⚙️ 设置</button>
+                <button class="btn btn-secondary" id="btn-about" title="关于">ℹ️ 关于</button>
+            </div>
+        </header>
+
+        <!-- Mode Switch Tabs -->
+        <div class="mode-switch-container">
+            <div class="mode-switch-tabs">
+                <button class="mode-tab active" id="mode-tab-latex" data-mode="latex">
+                    <span class="tab-icon">📄</span>arXiv论文翻译
+                </button>
+                <button class="mode-tab" id="mode-tab-pdf" data-mode="pdf" style="display: none;">
+                    <span class="tab-icon">📑</span>PDF 翻译
+                </button>
+            </div>
+        </div>
+
+        <!-- LaTeX Input Section (existing, shown by default) -->
+        <section class="input-section" id="latex-input-section">
+            <input type="text" id="input-source" placeholder="输入 arXiv URL、arXiv ID（如 2301.00001）或本地 zip 文件路径..."
+                autocomplete="off" />
+            <button class="btn btn-secondary" id="btn-browse">📁 浏览</button>
+            <button class="btn btn-primary" id="btn-process">🚀 开始处理</button>
+            <button class="btn btn-secondary" id="btn-cancel" style="display: none;">❌ 取消</button>
+            <div class="dropdown" id="download-dropdown" style="display: none;">
+                <button class="btn btn-secondary dropdown-toggle" id="btn-download">📥 下载</button>
+                <div class="dropdown-menu" id="download-menu">
+                    <button class="dropdown-item" id="download-chinese-pdf">📄 中文 PDF</button>
+                    <button class="dropdown-item" id="download-bilingual-pdf">📑 中英对照 PDF</button>
+                    <button class="dropdown-item" id="download-latex-zip">📦 翻译后 LaTeX</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- PDF Input Section (for PDF mode, hidden by default) -->
+        <section class="pdf-input-section" id="pdf-input-section" style="display: none;">
+            <div class="pdf-drop-zone" id="pdf-drop-zone">
+                <div class="drop-icon">📄</div>
+                <div class="drop-text">拖拽 PDF 文件到此处</div>
+                <div class="drop-hint">或点击下方按钮选择文件</div>
+                <button class="btn-select-pdf" id="btn-select-pdf">📁 选择 PDF 文件</button>
+            </div>
+            <div class="pdf-file-selected" id="pdf-file-selected">
+                <div class="pdf-file-icon">📄</div>
+                <div class="pdf-file-info">
+                    <div class="pdf-file-name" id="pdf-file-name">example.pdf</div>
+                    <div class="pdf-file-size" id="pdf-file-size">2.5 MB</div>
+                </div>
+                <div class="pdf-file-actions">
+                    <button class="btn-clear-pdf" id="btn-clear-pdf">✕ 清除</button>
+                    <button class="btn-translate-pdf" id="btn-translate-pdf">🚀 开始翻译</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- PDF Viewer Container -->
+        <main class="pdf-container">
+            <!-- Left Panel - Original English PDF -->
+            <div class="pdf-panel pdf-panel-left">
+                <div class="pdf-panel-header">
+                    <span class="pdf-panel-title">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                            <polyline points="10 9 9 9 8 9"></polyline>
+                        </svg>
+                        原始文档 (English)
+                    </span>
+                </div>
+                <div class="pdf-iframe-container" id="pdf-left-container">
+                    <!-- Placeholder shown when no PDF is loaded -->
+                    <div class="pdf-placeholder" id="pdf-left-placeholder">
+                        <svg class="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <p>原始英文 PDF 将在此显示<br />请输入源码来源并开始处理</p>
+                    </div>
+                    <!-- PDF iframe (hidden initially) -->
+                    <iframe class="pdf-iframe" id="pdf-left-iframe" style="display: none;"></iframe>
+                </div>
+            </div>
+
+            <!-- Right Panel - Translated Chinese PDF -->
+            <div class="pdf-panel pdf-panel-right">
+                <div class="pdf-panel-header">
+                    <span class="pdf-panel-title">
+                        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                            <line x1="16" y1="13" x2="8" y2="13"></line>
+                            <line x1="16" y1="17" x2="8" y2="17"></line>
+                            <polyline points="10 9 9 9 8 9"></polyline>
+                        </svg>
+                        翻译文档 (中文)
+                    </span>
+                    <button class="btn-download-translated" id="btn-download-translated" title="下载翻译后 PDF"
+                        style="display: none;">
+                        📥 下载
+                    </button>
+                </div>
+                <div class="pdf-iframe-container" id="pdf-right-container">
+                    <!-- Placeholder shown when no PDF is loaded -->
+                    <div class="pdf-placeholder" id="pdf-right-placeholder">
+                        <svg class="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="1.5">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                            <polyline points="14 2 14 8 20 8"></polyline>
+                        </svg>
+                        <p>翻译后的中文 PDF 将在此显示<br />等待翻译完成...</p>
+                    </div>
+                    <!-- PDF iframe (hidden initially) -->
+                    <iframe class="pdf-iframe" id="pdf-right-iframe" style="display: none;"></iframe>
+                </div>
+            </div>
+        </main>
+
+        <!-- Status Bar -->
+        <footer class="status-bar">
+            <div class="status-left">
+                <div class="status-indicator">
+                    <span class="status-dot idle" id="status-dot"></span>
+                    <span class="status-message" id="status-message">就绪</span>
+                </div>
+                <div class="progress-container" id="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                    <span class="progress-text" id="progress-text">0%</span>
+                </div>
+            </div>
+            <div class="status-right">
+                <span class="status-phase" id="status-phase">空闲</span>
+            </div>
+        </footer>
+
+        <!-- Settings Modal -->
+        <div class="modal-overlay" id="settings-modal">
+            <div class="modal">
+                <div class="modal-header">
+                    <h2>⚙️ 设置</h2>
+                    <button class="modal-close" id="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="setting-api-key">API Key</label>
+                        <input type="password" id="setting-api-key" placeholder="sk-..." autocomplete="off" />
+                        <p class="hint">OpenAI 或兼容 API 的密钥</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-base-url">API Base URL</label>
+                        <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1"
+                            autocomplete="off" />
+                        <p class="hint">OpenAI 兼容 API 的地址，如 https://api.deepseek.com/v1</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-model">模型</label>
+                        <input type="text" id="setting-model" placeholder="gpt-4" autocomplete="off" />
+                        <p class="hint">使用的模型名称，如 gpt-4、gpt-3.5-turbo、deepseek-chat</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-context-window">上下文窗口 (tokens)</label>
+                        <input type="number" id="setting-context-window" placeholder="8192" min="1024" max="128000"
+                            autocomplete="off" />
+                        <p class="hint">模型的上下文窗口大小，默认 8192</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-compiler">LaTeX 编译器</label>
+                        <select id="setting-compiler">
+                            <option value="pdflatex">pdflatex</option>
+                            <option value="xelatex">xelatex</option>
+                            <option value="lualatex">lualatex</option>
+                        </select>
+                        <p class="hint">默认编译器（中文文档会自动使用 xelatex）</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-workdir">工作目录</label>
+                        <div class="input-with-button">
+                            <input type="text" id="setting-workdir" placeholder="留空使用临时目录" autocomplete="off" />
+                            <button class="btn btn-secondary btn-small" id="btn-browse-workdir">📁</button>
+                        </div>
+                        <p class="hint">处理文件的工作目录，留空则使用系统临时目录</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-concurrency">翻译并发数</label>
+                        <input type="number" id="setting-concurrency" placeholder="3" min="1" max="10"
+                            autocomplete="off" />
+                        <p class="hint">同时翻译的分块数量，增加可加快速度但会消耗更多 API 配额，默认 3</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="setting-library-page-size">浏览库每页显示数量</label>
+                        <input type="number" id="setting-library-page-size" placeholder="20" min="1" max="100"
+                            autocomplete="off" />
+                        <p class="hint">浏览共享库时每页显示的论文数量，默认 20</p>
+                    </div>
+                    <div class="form-group test-connection">
+                        <button class="btn btn-secondary" id="btn-test-connection">🔗 测试 LLM 连接</button>
+                        <span class="test-status" id="test-status"></span>
+                    </div>
+
+                    <!-- GitHub 分享配置 -->
+                    <div class="settings-section-title">GitHub 分享配置（可选）</div>
+                    <div class="form-group">
+                        <label for="setting-github-token">GitHub Token</label>
+                        <input type="password" id="setting-github-token" placeholder="自动获取或手动输入" autocomplete="off"
+                            readonly />
+                        <p class="hint">Token 已自动从远程获取，用于访问 GitHub 仓库 (rapidaicoder/chinesepaper)</p>
+                    </div>
+                    <div class="form-group test-connection">
+                        <button class="btn btn-secondary" id="btn-update-github-token">🔄 更新 Token</button>
+                        <button class="btn btn-secondary" id="btn-test-github">🔗 测试 GitHub 连接</button>
+                        <span class="test-status" id="github-test-status"></span>
+                        <span class="test-status" id="github-update-status"></span>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-settings-cancel">取消</button>
+                    <button class="btn btn-primary" id="btn-settings-save">保存</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast Container -->
+        <div class="toast-container" id="toast-container"></div>
+
+        <!-- About Modal -->
+        <div class="modal-overlay" id="about-modal">
+            <div class="modal about-modal">
+                <div class="modal-header">
+                    <h2>ℹ️ 关于</h2>
+                    <button class="modal-close" id="about-modal-close">&times;</button>
+                </div>
+                <div class="modal-body about-body">
+                    <div class="about-logo">
+                        <svg viewBox="0 0 100 100" width="80" height="80">
+                            <!-- Document base -->
+                            <rect x="15" y="5" width="50" height="65" rx="3" fill="#667eea" opacity="0.9" />
+                            <rect x="20" y="10" width="40" height="55" rx="2" fill="white" />
+                            <!-- Text lines -->
+                            <rect x="25" y="18" width="30" height="3" rx="1" fill="#ddd" />
+                            <rect x="25" y="25" width="25" height="3" rx="1" fill="#ddd" />
+                            <rect x="25" y="32" width="28" height="3" rx="1" fill="#ddd" />
+                            <rect x="25" y="39" width="20" height="3" rx="1" fill="#ddd" />
+                            <!-- Arrow -->
+                            <path d="M55 45 L75 45 L75 38 L90 50 L75 62 L75 55 L55 55 Z" fill="#764ba2" />
+                            <!-- Translated document -->
+                            <rect x="35" y="30" width="50" height="65" rx="3" fill="#4CAF50" opacity="0.9" />
+                            <rect x="40" y="35" width="40" height="55" rx="2" fill="white" />
+                            <!-- Chinese text representation -->
+                            <rect x="45" y="43" width="30" height="3" rx="1" fill="#4CAF50" />
+                            <rect x="45" y="50" width="25" height="3" rx="1" fill="#4CAF50" />
+                            <rect x="45" y="57" width="28" height="3" rx="1" fill="#4CAF50" />
+                            <rect x="45" y="64" width="20" height="3" rx="1" fill="#4CAF50" />
+                        </svg>
+                    </div>
+                    <h3 class="about-title">论译</h3>
+                    <p class="about-subtitle">RapidPaperTrans</p>
+                    <p class="about-slogan">Rapid Translation, Flawless Integration.</p>
+                    <p class="about-version">版本 1.0 beta</p>
+                    <div class="about-divider"></div>
+                    <p class="about-description">
+                        将英文 LaTeX 学术论文翻译成中文并生成 PDF
+                    </p>
+                    <div class="about-author">
+                        <span>作者：Dr. Daniel</span>
+                    </div>
+                    <a class="about-github" href="#" id="github-link">
+                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                            <path
+                                d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+                        </svg>
+                        GitHub
+                    </a>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" id="btn-about-close">确定</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results Management Modal -->
+        <div class="modal-overlay" id="results-modal">
+            <div class="modal results-modal">
+                <div class="modal-header">
+                    <h2>📚 结果管理</h2>
+                    <button class="modal-close" id="results-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="results-intro">已翻译的论文列表，可以查看、删除或重新翻译。</p>
+                    <div class="results-list" id="results-list">
+                        <!-- Paper items will be dynamically inserted here -->
+                        <div class="results-empty" id="results-empty">
+                            <span class="empty-icon">📭</span>
+                            <p>暂无翻译记录</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-results-close">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Management Modal -->
+        <div class="modal-overlay" id="errors-modal">
+            <div class="modal errors-modal">
+                <div class="modal-header">
+                    <h2>⚠️ 错误管理</h2>
+                    <button class="modal-close" id="errors-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="errors-intro">翻译过程中出错的论文列表，可以重试或清除记录。</p>
+                    <div class="errors-list" id="errors-list">
+                        <!-- Error items will be dynamically inserted here -->
+                        <div class="errors-empty" id="errors-empty">
+                            <span class="empty-icon">✅</span>
+                            <p>暂无错误记录</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-export-errors">📤 导出详细报告</button>
+                    <button class="btn btn-secondary" id="btn-export-error-ids">📋 导出 ID 列表</button>
+                    <button class="btn btn-secondary" id="btn-clear-all-errors">清除全部</button>
+                    <button class="btn btn-secondary" id="btn-errors-close">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Share Modal -->
+        <div class="modal-overlay" id="share-modal">
+            <div class="modal share-modal">
+                <div class="modal-header">
+                    <h2>🔗 分享到 GitHub</h2>
+                    <button class="modal-close" id="share-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="share-intro">将翻译结果上传到 GitHub 仓库分享给他人。</p>
+                    <div class="share-files">
+                        <div class="share-file-item" id="share-chinese-item">
+                            <input type="checkbox" id="share-chinese-check" checked />
+                            <label for="share-chinese-check">
+                                <span class="file-icon">📄</span>
+                                <span class="file-name" id="share-chinese-name">arxiv_id_cn.pdf</span>
+                                <span class="file-status" id="share-chinese-status"></span>
+                            </label>
+                        </div>
+                        <div class="share-file-item" id="share-bilingual-item">
+                            <input type="checkbox" id="share-bilingual-check" checked />
+                            <label for="share-bilingual-check">
+                                <span class="file-icon">📑</span>
+                                <span class="file-name" id="share-bilingual-name">arxiv_id_bilingual.pdf</span>
+                                <span class="file-status" id="share-bilingual-status"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="share-warning" id="share-warning" style="display: none;">
+                        <span class="warning-icon">⚠️</span>
+                        <span class="warning-text">部分文件已存在，勾选将覆盖原有文件</span>
+                    </div>
+                    <div class="share-progress" id="share-progress" style="display: none;">
+                        <span class="progress-icon">⏳</span>
+                        <span class="progress-text">正在上传...</span>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-share-cancel">取消</button>
+                    <button class="btn btn-primary" id="btn-share-confirm">上传</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- GitHub Download Modal -->
+        <div class="modal-overlay" id="github-download-modal">
+            <div class="modal download-modal">
+                <div class="modal-header">
+                    <h2>📥 下载翻译文件</h2>
+                    <button class="modal-close" id="download-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="download-intro">
+                        <span class="arxiv-id-display" id="download-arxiv-id"></span>
+                        <span class="download-hint">选择要下载的文件：</span>
+                    </p>
+                    <div class="download-files">
+                        <div class="download-file-item" id="download-chinese-item" style="display: none;">
+                            <input type="checkbox" id="download-chinese-check" checked />
+                            <label for="download-chinese-check">
+                                <span class="file-icon">📄</span>
+                                <div class="file-info">
+                                    <span class="file-label">中文 PDF</span>
+                                    <span class="file-name" id="download-chinese-name"></span>
+                                </div>
+                            </label>
+                        </div>
+                        <div class="download-file-item" id="download-bilingual-item" style="display: none;">
+                            <input type="checkbox" id="download-bilingual-check" checked />
+                            <label for="download-bilingual-check">
+                                <span class="file-icon">📑</span>
+                                <div class="file-info">
+                                    <span class="file-label">双语对照 PDF</span>
+                                    <span class="file-name" id="download-bilingual-name"></span>
+                                </div>
+                            </label>
+                        </div>
+                        <div class="download-file-item" id="download-latex-item" style="display: none;">
+                            <input type="checkbox" id="download-latex-check" checked />
+                            <label for="download-latex-check">
+                                <span class="file-icon">📦</span>
+                                <div class="file-info">
+                                    <span class="file-label">LaTeX 源码</span>
+                                    <span class="file-name" id="download-latex-name"></span>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="download-progress" id="download-progress" style="display: none;">
+                        <span class="progress-icon">⏳</span>
+                        <span class="progress-text" id="download-progress-text">正在下载...</span>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-download-cancel">取消</button>
+                    <button class="btn btn-primary" id="btn-download-confirm">下载</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Browse Library Modal -->
+        <div class="modal-overlay" id="browse-library-modal">
+            <div class="modal library-modal">
+                <div class="modal-header">
+                    <h2>📚 浏览共享库</h2>
+                    <button class="modal-close" id="library-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="library-loading" id="library-loading">
+                        <span class="loading-spinner">⏳</span>
+                        <span>正在加载论文列表...</span>
+                    </div>
+                    <div class="library-content" id="library-content" style="display: none;">
+                        <div class="library-list" id="library-list">
+                            <!-- Papers will be dynamically inserted here -->
+                        </div>
+                        <div class="library-pagination" id="library-pagination">
+                            <button class="pagination-btn" id="btn-first-page" title="首页">
+                                <span>⏮️</span>
+                            </button>
+                            <button class="pagination-btn" id="btn-prev-page" title="上一页">
+                                <span>◀️</span>
+                            </button>
+                            <span class="pagination-info" id="pagination-info">
+                                第 <span id="current-page">1</span> / <span id="total-pages">1</span> 页
+                            </span>
+                            <button class="pagination-btn" id="btn-next-page" title="下一页">
+                                <span>▶️</span>
+                            </button>
+                            <button class="pagination-btn" id="btn-last-page" title="末页">
+                                <span>⏭️</span>
+                            </button>
+                            <span class="pagination-total">
+                                共 <span id="total-papers">0</span> 篇论文
+                            </span>
+                        </div>
+                    </div>
+                    <div class="library-empty" id="library-empty" style="display: none;">
+                        <p>暂无已翻译的论文</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-library-close">关闭</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Startup Check Modal -->
+        <div class="modal-overlay" id="startup-check-modal">
+            <div class="modal startup-check-modal">
+                <div class="modal-header">
+                    <h2>⚠️ 环境检测</h2>
+                </div>
+                <div class="modal-body">
+                    <p class="startup-check-intro">程序需要以下环境才能正常运行：</p>
+
+                    <div class="check-item" id="check-latex">
+                        <div class="check-icon">
+                            <span class="check-spinner" id="latex-spinner">⏳</span>
+                            <span class="check-status" id="latex-status" style="display: none;"></span>
+                        </div>
+                        <div class="check-content">
+                            <div class="check-title">LaTeX 编译器</div>
+                            <div class="check-detail" id="latex-detail">检测中...</div>
+                            <div class="check-action" id="latex-action" style="display: none;">
+                                <a href="#" id="latex-download-link" class="download-link">📥 下载 LaTeX</a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="check-item" id="check-llm">
+                        <div class="check-icon">
+                            <span class="check-spinner" id="llm-spinner">⏳</span>
+                            <span class="check-status" id="llm-status" style="display: none;"></span>
+                        </div>
+                        <div class="check-content">
+                            <div class="check-title">LLM 配置</div>
+                            <div class="check-detail" id="llm-detail">检测中...</div>
+                            <div class="check-action" id="llm-action" style="display: none;">
+                                <button class="btn btn-secondary btn-small" id="btn-configure-llm">⚙️ 配置 LLM</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-recheck">🔄 重新检测</button>
+                    <button class="btn btn-primary" id="btn-continue" disabled>继续</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Translate Confirm Modal -->
+        <div class="modal-overlay" id="translate-confirm-modal">
+            <div class="modal translate-confirm-modal">
+                <div class="modal-header">
+                    <h2>📄 翻译确认</h2>
+                    <button class="modal-close" id="translate-confirm-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="translate-confirm-intro" id="translate-confirm-intro">
+                        在 GitHub 上未找到该论文的翻译。
+                    </p>
+                    <div class="paper-preview" id="paper-preview">
+                        <div class="paper-preview-item">
+                            <span class="preview-label">arXiv ID:</span>
+                            <span class="preview-value" id="preview-arxiv-id">-</span>
+                        </div>
+                        <div class="paper-preview-item">
+                            <span class="preview-label">论文标题:</span>
+                            <span class="preview-value preview-title" id="preview-title">-</span>
+                        </div>
+                        <div class="paper-preview-item">
+                            <span class="preview-label">作者:</span>
+                            <span class="preview-value preview-authors" id="preview-authors">-</span>
+                        </div>
+                    </div>
+                    <p class="translate-confirm-question">是否要翻译这篇论文？</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-translate-cancel">取消</button>
+                    <button class="btn btn-primary" id="btn-translate-confirm">🚀 开始翻译</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="./src/main.js" type="module"></script>
+</body>
+
+</html>

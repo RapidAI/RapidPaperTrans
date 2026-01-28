@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "论译",
+  "title": "论译",
+  "outputfilename": "RapidPaperTrans",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "znsoft",
+    "email": "znsoft@163.com"
+  },
+  "info": {
+    "companyName": "RapidAI",
+    "productName": "论译 RapidPaperTrans",
+    "productVersion": "1.0.0",
+    "copyright": "Copyright © 2024 RapidAI",
+    "comments": "LaTeX论文翻译工具"
+  }
+}
