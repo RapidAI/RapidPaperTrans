@@ -999,6 +999,28 @@
             box-shadow: 0 2px 8px rgba(229, 115, 115, 0.15);
         }
 
+        .error-item.error-reported {
+            background: #f5f5f5;
+            border-color: #d0d0d0;
+            border-left-color: #9e9e9e;
+        }
+
+        .error-item.error-reported:hover {
+            border-color: #bdbdbd;
+            background: #f0f0f0;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .error-reported-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background: #4caf50;
+            color: white;
+            font-weight: 500;
+            flex-shrink: 0;
+        }
+
         .error-icon {
             font-size: 24px;
             flex-shrink: 0;
@@ -1296,6 +1318,97 @@
         .share-progress .progress-text {
             font-size: 14px;
             color: #5a9aad;
+        }
+
+        /* Category Select Styles */
+        .category-select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fafcfd;
+            cursor: pointer;
+        }
+
+        .category-select:focus {
+            outline: none;
+            border-color: #7eb8c9;
+            box-shadow: 0 0 0 3px rgba(126, 184, 201, 0.15);
+        }
+
+        .required {
+            color: #e57373;
+        }
+
+        /* Checkbox Label Styles */
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            color: #4a6572;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+
+        /* Library Filter Styles */
+        .library-filter {
+            margin-bottom: 16px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #e8eff3;
+        }
+
+        .library-filter label {
+            display: block;
+            font-size: 13px;
+            color: #6b8090;
+            margin-bottom: 8px;
+        }
+
+        .category-filter-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            max-height: 120px;
+            overflow-y: auto;
+        }
+
+        .category-tag {
+            display: inline-block;
+            padding: 4px 10px;
+            font-size: 12px;
+            border-radius: 12px;
+            background: #f0f5f7;
+            color: #5a7080;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid transparent;
+        }
+
+        .category-tag:hover {
+            background: #e5eef2;
+            border-color: #b8c9d1;
+        }
+
+        .category-tag.selected {
+            background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
+            color: white;
+            border-color: transparent;
+        }
+
+        .category-tag[title] {
+            position: relative;
+        }
+
+        /* Library Modal wider */
+        .library-modal {
+            max-width: 700px;
         }
 
         /* GitHub Download Modal Styles */
@@ -1915,6 +2028,30 @@
             max-width: 500px;
         }
 
+        /* Generic Confirm Modal */
+        .generic-confirm-modal {
+            max-width: 450px;
+        }
+
+        .generic-confirm-modal #generic-confirm-message {
+            font-size: 14px;
+            color: #4a5568;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
+        /* Alert Modal */
+        .alert-modal {
+            max-width: 400px;
+        }
+
+        .alert-modal #alert-message {
+            font-size: 14px;
+            color: #4a5568;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+
         .translate-confirm-intro {
             font-size: 14px;
             color: #6b8090;
@@ -1968,6 +2105,62 @@
             color: #3d5a6c;
             text-align: center;
             margin: 0;
+        }
+
+        /* Share Prompt Modal */
+        .share-prompt-modal {
+            max-width: 420px;
+        }
+
+        .share-prompt-icon {
+            font-size: 48px;
+            text-align: center;
+            margin-bottom: 16px;
+        }
+
+        .share-prompt-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #3d5a6c;
+            text-align: center;
+            margin-bottom: 12px;
+        }
+
+        .share-prompt-desc {
+            font-size: 14px;
+            color: #6b8090;
+            text-align: center;
+            line-height: 1.6;
+            margin-bottom: 20px;
+        }
+
+        .share-prompt-benefits {
+            background: #f0f9f4;
+            border: 1px solid #c8e6d0;
+            border-radius: 10px;
+            padding: 14px 16px;
+            margin-bottom: 16px;
+        }
+
+        .share-prompt-benefits ul {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        .share-prompt-benefits li {
+            font-size: 13px;
+            color: #4a7c59;
+            padding: 4px 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .share-prompt-benefits li::before {
+            content: '✓';
+            font-weight: bold;
+            color: #81c995;
         }
     </style>
 </head>
@@ -2190,6 +2383,13 @@
                             autocomplete="off" />
                         <p class="hint">浏览共享库时每页显示的论文数量，默认 20</p>
                     </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="setting-share-prompt" checked />
+                            <span>翻译完成后提示分享</span>
+                        </label>
+                        <p class="hint">翻译成功完成后，弹出分享确认提示</p>
+                    </div>
                     <div class="form-group test-connection">
                         <button class="btn btn-secondary" id="btn-test-connection">🔗 测试 LLM 连接</button>
                         <span class="test-status" id="test-status"></span>
@@ -2316,6 +2516,7 @@
                     </div>
                 </div>
                 <div class="modal-footer">
+                    <button class="btn btn-primary" id="btn-report-errors">🐛 上报到 GitHub</button>
                     <button class="btn btn-secondary" id="btn-export-errors">📤 导出详细报告</button>
                     <button class="btn btn-secondary" id="btn-export-error-ids">📋 导出 ID 列表</button>
                     <button class="btn btn-secondary" id="btn-clear-all-errors">清除全部</button>
@@ -2333,6 +2534,16 @@
                 </div>
                 <div class="modal-body">
                     <p class="share-intro">将翻译结果上传到 GitHub 仓库分享给他人。</p>
+                    
+                    <!-- Category Selection -->
+                    <div class="form-group">
+                        <label for="share-category">论文类别 <span class="required">*</span></label>
+                        <select id="share-category" class="category-select">
+                            <option value="">-- 请选择类别 --</option>
+                        </select>
+                        <p class="hint" id="share-category-hint"></p>
+                    </div>
+                    
                     <div class="share-files">
                         <div class="share-file-item" id="share-chinese-item">
                             <input type="checkbox" id="share-chinese-check" checked />
@@ -2431,6 +2642,14 @@
                     <button class="modal-close" id="library-modal-close">&times;</button>
                 </div>
                 <div class="modal-body">
+                    <!-- Category Filter -->
+                    <div class="library-filter" id="library-filter">
+                        <label>类别筛选：</label>
+                        <div class="category-filter-tags" id="category-filter-tags">
+                            <span class="category-tag selected" data-category="all">全部</span>
+                            <!-- Category tags will be dynamically inserted here -->
+                        </div>
+                    </div>
                     <div class="library-loading" id="library-loading">
                         <span class="loading-spinner">⏳</span>
                         <span>正在加载论文列表...</span>
@@ -2514,6 +2733,34 @@
             </div>
         </div>
 
+        <!-- Share Prompt Modal -->
+        <div class="modal-overlay" id="share-prompt-modal">
+            <div class="modal share-prompt-modal">
+                <div class="modal-header">
+                    <h2>🎉 翻译完成</h2>
+                    <button class="modal-close" id="share-prompt-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="share-prompt-icon">🚀</div>
+                    <div class="share-prompt-title">是否分享到共享库？</div>
+                    <p class="share-prompt-desc">
+                        分享后其他用户可以直接下载您的翻译结果，帮助更多人阅读这篇论文。
+                    </p>
+                    <div class="share-prompt-benefits">
+                        <ul>
+                            <li>帮助他人节省翻译时间</li>
+                            <li>共建学术翻译社区</li>
+                            <li>您的贡献将被记录</li>
+                        </ul>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-share-prompt-cancel">暂不分享</button>
+                    <button class="btn btn-primary" id="btn-share-prompt-confirm">🔗 去分享</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Translate Confirm Modal -->
         <div class="modal-overlay" id="translate-confirm-modal">
             <div class="modal translate-confirm-modal">
@@ -2544,6 +2791,39 @@
                 <div class="modal-footer">
                     <button class="btn btn-secondary" id="btn-translate-cancel">取消</button>
                     <button class="btn btn-primary" id="btn-translate-confirm">🚀 开始翻译</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Generic Confirm Dialog -->
+        <div class="modal-overlay" id="generic-confirm-modal">
+            <div class="modal generic-confirm-modal">
+                <div class="modal-header">
+                    <h2 id="generic-confirm-title">确认</h2>
+                    <button class="modal-close" id="generic-confirm-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p id="generic-confirm-message">确定要执行此操作吗？</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-generic-cancel">取消</button>
+                    <button class="btn btn-primary" id="btn-generic-confirm">确定</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alert Dialog (for info/warning messages) -->
+        <div class="modal-overlay" id="alert-modal">
+            <div class="modal alert-modal">
+                <div class="modal-header">
+                    <h2 id="alert-title">提示</h2>
+                    <button class="modal-close" id="alert-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p id="alert-message">消息内容</p>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-primary" id="btn-alert-ok">确定</button>
                 </div>
             </div>
         </div>

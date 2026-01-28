@@ -22,6 +22,10 @@ export function CheckShareStatusForPaper(arg1) {
   return window['go']['main']['App']['CheckShareStatusForPaper'](arg1);
 }
 
+export function CheckShareStatusWithCategory(arg1) {
+  return window['go']['main']['App']['CheckShareStatusWithCategory'](arg1);
+}
+
 export function CheckStartupRequirements() {
   return window['go']['main']['App']['CheckStartupRequirements']();
 }
@@ -106,6 +110,10 @@ export function GetPDFStatus() {
   return window['go']['main']['App']['GetPDFStatus']();
 }
 
+export function GetPaperCategories() {
+  return window['go']['main']['App']['GetPaperCategories']();
+}
+
 export function GetResultsDirectory() {
   return window['go']['main']['App']['GetResultsDirectory']();
 }
@@ -140,6 +148,10 @@ export function IsProcessing() {
 
 export function ListErrors() {
   return window['go']['main']['App']['ListErrors']();
+}
+
+export function ListGitHubTranslationsByCategories(arg1, arg2) {
+  return window['go']['main']['App']['ListGitHubTranslationsByCategories'](arg1, arg2);
 }
 
 export function ListRecentGitHubTranslations(arg1) {
@@ -190,6 +202,10 @@ export function ReloadConfig() {
   return window['go']['main']['App']['ReloadConfig']();
 }
 
+export function ReportErrorsToGitHub() {
+  return window['go']['main']['App']['ReportErrorsToGitHub']();
+}
+
 export function RetranslateFromArxiv(arg1) {
   return window['go']['main']['App']['RetranslateFromArxiv'](arg1);
 }
@@ -202,8 +218,8 @@ export function SaveLastInput(arg1) {
   return window['go']['main']['App']['SaveLastInput'](arg1);
 }
 
-export function SaveSettings(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11) {
-  return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11);
+export function SaveSettings(arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12) {
+  return window['go']['main']['App']['SaveSettings'](arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9, arg10, arg11, arg12);
 }
 
 export function SearchGitHubTranslation(arg1) {
@@ -222,12 +238,12 @@ export function SetWorkDir(arg1) {
   return window['go']['main']['App']['SetWorkDir'](arg1);
 }
 
-export function SharePaperToGitHub(arg1, arg2, arg3) {
-  return window['go']['main']['App']['SharePaperToGitHub'](arg1, arg2, arg3);
+export function SharePaperToGitHub(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['SharePaperToGitHub'](arg1, arg2, arg3, arg4);
 }
 
-export function ShareToGitHub(arg1, arg2) {
-  return window['go']['main']['App']['ShareToGitHub'](arg1, arg2);
+export function ShareToGitHub(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ShareToGitHub'](arg1, arg2, arg3);
 }
 
 export function TestAPIConnection(arg1, arg2, arg3) {

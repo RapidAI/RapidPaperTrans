@@ -125,6 +125,10 @@ func (d *SourceDownloader) DownloadFromURL(url string) (*types.SourceInfo, error
 		return nil, types.NewAppError(types.ErrInvalidInput, "invalid URL format: must start with http:// or https://", nil)
 	}
 
+	// Convert arXiv abstract/pdf URLs to e-print URLs for source download
+	url = convertArxivURL(url)
+	logger.Debug("converted URL", logger.String("url", url))
+
 	// Ensure work directory exists
 	if err := os.MkdirAll(d.workDir, 0755); err != nil {
 		logger.Error("failed to create work directory", err, logger.String("workDir", d.workDir))
@@ -303,6 +307,18 @@ func extractFilenameFromURL(url string) string {
 			id := url[idx+len("/src/"):]
 			return strings.ReplaceAll(id, "/", "_") + ".tar.gz"
 		}
+		// Handle abs URLs: https://arxiv.org/abs/2301.00001
+		if idx := strings.LastIndex(url, "/abs/"); idx != -1 {
+			id := url[idx+len("/abs/"):]
+			return strings.ReplaceAll(id, "/", "_") + ".tar.gz"
+		}
+		// Handle pdf URLs: https://arxiv.org/pdf/2301.00001
+		if idx := strings.LastIndex(url, "/pdf/"); idx != -1 {
+			id := url[idx+len("/pdf/"):]
+			// Remove .pdf extension if present
+			id = strings.TrimSuffix(id, ".pdf")
+			return strings.ReplaceAll(id, "/", "_") + ".tar.gz"
+		}
 	}
 
 	// Default: use the last path segment
@@ -320,6 +336,52 @@ func extractFilenameFromURL(url string) string {
 
 	// Fallback filename
 	return "download.tar.gz"
+}
+
+// convertArxivURL converts various arXiv URL formats to the e-print download URL.
+// Supported input formats:
+// - https://arxiv.org/abs/2301.00001 (abstract page)
+// - https://arxiv.org/pdf/2301.00001 (PDF page)
+// - https://arxiv.org/pdf/2301.00001.pdf (PDF direct link)
+// - https://export.arxiv.org/abs/2301.00001
+// All are converted to: https://arxiv.org/e-print/2301.00001
+func convertArxivURL(url string) string {
+	// Check if it's an arXiv URL
+	if !strings.Contains(url, "arxiv.org") {
+		return url
+	}
+
+	// Extract the arXiv ID from various URL formats
+	var arxivID string
+
+	// Handle /abs/ URLs
+	if idx := strings.LastIndex(url, "/abs/"); idx != -1 {
+		arxivID = url[idx+len("/abs/"):]
+	}
+	// Handle /pdf/ URLs
+	if idx := strings.LastIndex(url, "/pdf/"); idx != -1 {
+		arxivID = url[idx+len("/pdf/"):]
+		// Remove .pdf extension if present
+		arxivID = strings.TrimSuffix(arxivID, ".pdf")
+	}
+
+	// If we extracted an arXiv ID, convert to e-print URL
+	if arxivID != "" {
+		// Clean up the ID (remove any trailing slashes or query parameters)
+		if idx := strings.Index(arxivID, "?"); idx != -1 {
+			arxivID = arxivID[:idx]
+		}
+		arxivID = strings.TrimSuffix(arxivID, "/")
+
+		newURL := ArxivEprintBaseURL + arxivID
+		logger.Info("converted arXiv URL to e-print format",
+			logger.String("original", url),
+			logger.String("converted", newURL))
+		return newURL
+	}
+
+	// Return original URL if no conversion needed
+	return url
 }
 
 // handleHTTPError creates an appropriate AppError based on the HTTP status code.

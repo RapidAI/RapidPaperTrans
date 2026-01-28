@@ -13,6 +13,7 @@ import (
 
 	"latex-translator/internal/logger"
 
+	ledongthucpdf "github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/color"
 	"github.com/pdfcpu/pdfcpu/pkg/pdfcpu/model"
@@ -1158,10 +1159,28 @@ func (g *PDFGenerator) getMaxPageForGeneration(originalPDF string, blocks []Tran
 		possiblePaths = append(possiblePaths, filepath.Join(g.workDir, originalPDF))
 	}
 	
+	// 也尝试当前目录
+	if !filepath.IsAbs(originalPDF) {
+		if cwd, err := os.Getwd(); err == nil {
+			possiblePaths = append(possiblePaths, filepath.Join(cwd, originalPDF))
+		}
+	}
+	
 	// 尝试每个可能的路径
 	for _, path := range possiblePaths {
 		if pageCount, err := g.getPDFPageCount(path); err == nil && pageCount > 0 {
 			logger.Info("using actual PDF page count",
+				logger.Int("pageCount", pageCount),
+				logger.String("source", "original PDF"),
+				logger.String("path", path))
+			return pageCount
+		}
+	}
+	
+	// 尝试使用 ledongthuc/pdf 库获取页数（更可靠）
+	for _, path := range possiblePaths {
+		if pageCount, err := g.getPDFPageCountWithLedongthuc(path); err == nil && pageCount > 0 {
+			logger.Info("using actual PDF page count (ledongthuc)",
 				logger.Int("pageCount", pageCount),
 				logger.String("source", "original PDF"),
 				logger.String("path", path))
@@ -1175,6 +1194,16 @@ func (g *PDFGenerator) getMaxPageForGeneration(originalPDF string, blocks []Tran
 		logger.Int("maxPage", maxPage),
 		logger.String("originalPDF", originalPDF))
 	return maxPage
+}
+
+// getPDFPageCountWithLedongthuc 使用 ledongthuc/pdf 库获取 PDF 页数
+func (g *PDFGenerator) getPDFPageCountWithLedongthuc(pdfPath string) (int, error) {
+	f, r, err := ledongthucpdf.Open(pdfPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return r.NumPage(), nil
 }
 
 // getPDFPageCountFromFile gets the page count from a PDF file path

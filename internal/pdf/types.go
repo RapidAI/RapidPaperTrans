@@ -69,12 +69,13 @@ type PDFStatus struct {
 
 // TranslationResult 翻译结果
 type TranslationResult struct {
-	OriginalPDFPath   string `json:"original_pdf_path"`
-	TranslatedPDFPath string `json:"translated_pdf_path"`
-	TotalBlocks       int    `json:"total_blocks"`
-	TranslatedBlocks  int    `json:"translated_blocks"`
-	CachedBlocks      int    `json:"cached_blocks"`
-	TokensUsed        int    `json:"tokens_used"`
+	OriginalPDFPath   string           `json:"original_pdf_path"`
+	TranslatedPDFPath string           `json:"translated_pdf_path"`
+	TotalBlocks       int              `json:"total_blocks"`
+	TranslatedBlocks  int              `json:"translated_blocks"`
+	CachedBlocks      int              `json:"cached_blocks"`
+	TokensUsed        int              `json:"tokens_used"`
+	PageCountResult   *PageCountResult `json:"page_count_result,omitempty"` // 页数检测结果
 }
 
 // CacheEntry 缓存条目

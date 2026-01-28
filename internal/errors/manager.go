@@ -20,6 +20,7 @@ const (
 	StageTranslation        ErrorStage = "translation"         // 翻译阶段
 	StageTranslatedCompile  ErrorStage = "translated_compile"  // 翻译后编译阶段
 	StagePDFGeneration      ErrorStage = "pdf_generation"      // PDF生成阶段
+	StagePageCountMismatch  ErrorStage = "page_count_mismatch" // 页数差异过大（可疑错误）
 )
 
 // ErrorRecord 错误记录
@@ -33,6 +34,8 @@ type ErrorRecord struct {
 	CanRetry    bool       `json:"can_retry"`    // 是否可以重试
 	RetryCount  int        `json:"retry_count"`  // 重试次数
 	LastRetry   time.Time  `json:"last_retry"`   // 最后重试时间
+	Reported    bool       `json:"reported"`     // 是否已上报到 GitHub
+	ReportedAt  time.Time  `json:"reported_at"`  // 上报时间
 }
 
 // ErrorManager 错误管理器
@@ -248,7 +251,55 @@ func GetStageDisplayName(stage ErrorStage) string {
 		return "翻译后编译"
 	case StagePDFGeneration:
 		return "PDF生成"
+	case StagePageCountMismatch:
+		return "页数差异过大"
 	default:
 		return string(stage)
 	}
+}
+
+// ListUnreportedErrors 列出所有未上报的错误记录
+func (em *ErrorManager) ListUnreportedErrors() []*ErrorRecord {
+	em.mu.RLock()
+	defer em.mu.RUnlock()
+
+	records := make([]*ErrorRecord, 0)
+	for _, record := range em.errors {
+		if !record.Reported {
+			// 创建副本以避免并发修改
+			recordCopy := *record
+			records = append(records, &recordCopy)
+		}
+	}
+
+	return records
+}
+
+// MarkAsReported 标记错误记录为已上报
+func (em *ErrorManager) MarkAsReported(ids []string) error {
+	em.mu.Lock()
+	defer em.mu.Unlock()
+
+	now := time.Now()
+	for _, id := range ids {
+		if record, ok := em.errors[id]; ok {
+			record.Reported = true
+			record.ReportedAt = now
+		}
+	}
+
+	return em.save()
+}
+
+// HasUnreportedErrors 检查是否有未上报的错误
+func (em *ErrorManager) HasUnreportedErrors() bool {
+	em.mu.RLock()
+	defer em.mu.RUnlock()
+
+	for _, record := range em.errors {
+		if !record.Reported {
+			return true
+		}
+	}
+	return false
 }

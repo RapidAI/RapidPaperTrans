@@ -982,23 +982,97 @@ func QuickFix(content string) (string, bool) {
 	// Pattern: \end{figure*}}}} or \end{table}}} etc.
 	// This is a common error from translation where extra braces are added
 	// We do this BEFORE the general brace counting to avoid conflicts
+	// NOTE: We need to be careful not to remove braces that are part of
+	// valid LaTeX structures like \newcommand{\foo}{\begin{...}\end{...}}
 	extraBracesPattern := regexp.MustCompile(`(\\end\{[^}]+\})(\}+)`)
 	if extraBracesPattern.MatchString(result) {
-		matches := extraBracesPattern.FindAllStringSubmatch(result, -1)
-		for _, match := range matches {
-			if len(match) > 2 {
-				// Check if these are truly extra braces (not part of a larger structure)
-				// by looking at the context
-				fullMatch := match[0]
-				endCmd := match[1]
-				extraBraces := match[2]
+		matches := extraBracesPattern.FindAllStringSubmatchIndex(result, -1)
+		// Process matches in reverse order to preserve indices
+		for i := len(matches) - 1; i >= 0; i-- {
+			matchIndices := matches[i]
+			if len(matchIndices) < 6 {
+				continue
+			}
+			
+			fullMatchStart := matchIndices[0]
+			fullMatchEnd := matchIndices[1]
+			endCmdEnd := matchIndices[3]
+			extraBracesCount := fullMatchEnd - endCmdEnd
+			
+			// Find the matching \begin for this \end
+			endEnvMatch := regexp.MustCompile(`\\end\{([^}]+)\}`).FindStringSubmatch(result[matchIndices[2]:matchIndices[3]])
+			if len(endEnvMatch) < 2 {
+				continue
+			}
+			envName := endEnvMatch[1]
+			
+			// Search backwards for the matching \begin
+			beginPat := regexp.MustCompile(`\\begin\{` + regexp.QuoteMeta(envName) + `\}`)
+			searchStart := fullMatchStart - 5000
+			if searchStart < 0 {
+				searchStart = 0
+			}
+			searchRegion := result[searchStart:fullMatchStart]
+			beginMatches := beginPat.FindAllStringIndex(searchRegion, -1)
+			
+			if len(beginMatches) == 0 {
+				// No matching \begin found, this is likely an error - remove extra braces
+				result = result[:endCmdEnd] + result[fullMatchEnd:]
+				anyFixed = true
+				continue
+			}
+			
+			// Get the position of the last (innermost) matching \begin
+			lastBeginIdx := searchStart + beginMatches[len(beginMatches)-1][0]
+			
+			// Check if we're inside a command definition by looking for \newcommand etc.
+			// before the \begin that hasn't been closed
+			preBeginStart := lastBeginIdx - 200
+			if preBeginStart < 0 {
+				preBeginStart = 0
+			}
+			preBeginRegion := result[preBeginStart:lastBeginIdx]
+			
+			// Look for command definition patterns that open a brace
+			// Find the last occurrence of \newcommand, \def, etc.
+			cmdDefPatterns := []string{"\\newcommand", "\\renewcommand", "\\providecommand", "\\def", "\\gdef", "\\edef", "\\xdef"}
+			cmdDefIdx := -1
+			for _, pat := range cmdDefPatterns {
+				idx := strings.LastIndex(preBeginRegion, pat)
+				if idx > cmdDefIdx {
+					cmdDefIdx = idx
+				}
+			}
+			
+			bracesToKeep := 0
+			if cmdDefIdx >= 0 {
+				// Found a command definition before \begin
+				// Count braces from the command definition to \end{...}
+				cmdDefStart := preBeginStart + cmdDefIdx
+				regionFromCmdDef := result[cmdDefStart:fullMatchStart]
 				
-				// Replace extra braces after \end{...}
-				result = strings.Replace(result, fullMatch, endCmd, 1)
+				openBraces := strings.Count(regionFromCmdDef, "{") - strings.Count(regionFromCmdDef, "\\{")
+				closeBraces := strings.Count(regionFromCmdDef, "}") - strings.Count(regionFromCmdDef, "\\}")
+				unclosedBraces := openBraces - closeBraces
+				
+				if unclosedBraces > 0 {
+					// There are unclosed braces from the command definition
+					// Keep braces that are needed to close the definition
+					bracesToKeep = unclosedBraces
+					if bracesToKeep > extraBracesCount {
+						bracesToKeep = extraBracesCount
+					}
+				}
+			}
+			
+			// Only fix if there are truly extra braces
+			if extraBracesCount > bracesToKeep {
+				newBraces := strings.Repeat("}", bracesToKeep)
+				result = result[:endCmdEnd] + newBraces + result[fullMatchEnd:]
 				anyFixed = true
 				logger.Debug("rule-based fix: removed extra closing braces after \\end",
-					logger.String("pattern", fullMatch),
-					logger.Int("extraBraces", len(extraBraces)))
+					logger.Int("removed", extraBracesCount-bracesToKeep),
+					logger.Int("kept", bracesToKeep))
 			}
 		}
 	}
@@ -1100,6 +1174,54 @@ func QuickFix(content string) (string, bool) {
 		result = endDocExtraBracesPattern.ReplaceAllString(result, "$1\n")
 		anyFixed = true
 		logger.Debug("rule-based fix: removed extra braces after \\end{document}")
+	}
+
+	// Rule 17: Fix missing closing brace for \resizebox in tables
+	// Pattern: \resizebox{\columnwidth}{!}{ ... \end{tabular} should have } after \end{tabular}
+	// This is a common issue in arXiv source files
+	result, resizeboxFixed := fixResizeboxClosingBrace(result)
+	if resizeboxFixed {
+		anyFixed = true
+	}
+
+	// Rule 18: Fix orphaned \begin{itemize/enumerate/description} followed by commented content
+	// Pattern: \begin{itemize} followed by lines starting with % and no matching \end{itemize}
+	// This happens when authors comment out list content but forget to comment out \begin
+	result, orphanedListFixed := fixOrphanedListEnvironments(result)
+	if orphanedListFixed {
+		anyFixed = true
+	}
+
+	// Rule 19: Fix duplicate image path in \includegraphics when \graphicspath is set
+	// Pattern: \graphicspath{ {./images/} } combined with \includegraphics{images/file.jpg}
+	// This causes LaTeX to look for ./images/images/file.jpg which doesn't exist
+	// Fix: Remove the redundant path prefix from \includegraphics
+	result, graphicsPathFixed := fixDuplicateGraphicsPath(result)
+	if graphicsPathFixed {
+		anyFixed = true
+	}
+
+	// Rule 20: Fix document end issues (extra braces, incomplete \end{document}, duplicates)
+	// Pattern: }}} \end{document or \end{document \end{document}
+	// This is a common issue in arXiv source files with corrupted endings
+	result, docEndFixed := fixDocumentEndIssues(result)
+	if docEndFixed {
+		anyFixed = true
+	}
+
+	// Rule 21: Fix \newreptheorem definition missing closing braces
+	// This is a common bug in arXiv papers using the rep@theorem pattern
+	result, newreptheoremFixed := fixNewreptheoremDefinition(result)
+	if newreptheoremFixed {
+		anyFixed = true
+	}
+
+	// Rule 22: Fix extra closing brace after nested \end{tabular}
+	// Pattern: \end{tabular}} & should be \end{tabular} &
+	// This is common in tables with nested tabular environments in cells
+	result, nestedTabularFixed := fixNestedTabularExtraBrace(result)
+	if nestedTabularFixed {
+		anyFixed = true
 	}
 
 	return result, anyFixed

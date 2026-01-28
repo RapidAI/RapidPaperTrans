@@ -249,10 +249,13 @@ func (u *Uploader) SearchTranslation(arxivID string) (*TranslationSearchResult, 
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers - no auth needed for public repos
+	// Set headers - use auth if available for higher rate limit
+	if u.token != "" {
+		req.Header.Set("Authorization", "token "+u.token)
+	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-resp, err := u.client.Do(req)
+	resp, err := u.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -381,10 +384,13 @@ func (u *Uploader) ListRecentTranslations(maxCount int) ([]ArxivPaperInfo, error
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers - no auth needed for public repos
+	// Set headers - use auth if available for higher rate limit
+	if u.token != "" {
+		req.Header.Set("Authorization", "token "+u.token)
+	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-resp, err := u.client.Do(req)
+	resp, err := u.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
@@ -476,6 +482,202 @@ resp, err := u.client.Do(req)
 	}
 
 	return result, nil
+}
+
+// ArxivFileInfo represents a file associated with an arXiv paper
+type ArxivFileInfo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	SHA  string `json:"sha"`
+	Type string `json:"type"` // "chinese", "bilingual", "latex", "other"
+}
+
+// ListFilesForArxivID lists all files in the repository that belong to a specific arXiv ID
+// This is used to find old files that need to be deleted when uploading new ones
+func (u *Uploader) ListFilesForArxivID(arxivID string) ([]ArxivFileInfo, error) {
+	// Normalize arXiv ID for matching
+	safeID := strings.ReplaceAll(arxivID, "/", "_")
+
+	// List all files in the repository root
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/", u.owner, u.repo)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Use token for authenticated requests
+	if u.token != "" {
+		req.Header.Set("Authorization", "token "+u.token)
+	}
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 404 {
+		return []ArxivFileInfo{}, nil // Empty repo or not found
+	}
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var files []struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		SHA  string `json:"sha"`
+		Type string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	// Filter files that belong to this arXiv ID
+	var result []ArxivFileInfo
+	for _, file := range files {
+		if file.Type != "file" {
+			continue
+		}
+
+		// Check if filename starts with the arXiv ID
+		if !strings.HasPrefix(file.Name, safeID) {
+			continue
+		}
+
+		// Determine file type
+		fileType := "other"
+		nameLower := strings.ToLower(file.Name)
+		if strings.HasSuffix(nameLower, "_cn.pdf") || strings.Contains(nameLower, "_cn_") {
+			fileType = "chinese"
+		} else if strings.HasSuffix(nameLower, "_bilingual.pdf") || strings.Contains(nameLower, "_bilingual_") {
+			fileType = "bilingual"
+		} else if strings.HasSuffix(nameLower, ".zip") {
+			fileType = "latex"
+		}
+
+		result = append(result, ArxivFileInfo{
+			Name: file.Name,
+			Path: file.Path,
+			SHA:  file.SHA,
+			Type: fileType,
+		})
+	}
+
+	return result, nil
+}
+
+// DeleteFile deletes a file from the repository
+func (u *Uploader) DeleteFile(path, sha, commitMsg string) error {
+	if u.token == "" {
+		return errors.New("GitHub token is required for deleting files")
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", u.owner, u.repo, path)
+
+	requestBody := map[string]interface{}{
+		"message": commitMsg,
+		"sha":     sha,
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("DELETE", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "token "+u.token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// IssueCreateResult represents the result of creating an issue
+type IssueCreateResult struct {
+	Success   bool   `json:"success"`
+	IssueURL  string `json:"issue_url"`
+	IssueNum  int    `json:"issue_number"`
+	Message   string `json:"message"`
+}
+
+// CreateIssue creates a new issue in the repository
+func (u *Uploader) CreateIssue(title, body string, labels []string) (*IssueCreateResult, error) {
+	if u.token == "" {
+		return nil, errors.New("GitHub token is required for creating issues")
+	}
+
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues", u.owner, u.repo)
+
+	requestBody := map[string]interface{}{
+		"title": title,
+		"body":  body,
+	}
+	if len(labels) > 0 {
+		requestBody["labels"] = labels
+	}
+
+	jsonBody, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "token "+u.token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := u.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create issue: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 201 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("GitHub API error (status %d): %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var issueResp struct {
+		Number  int    `json:"number"`
+		HTMLURL string `json:"html_url"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&issueResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &IssueCreateResult{
+		Success:  true,
+		IssueURL: issueResp.HTMLURL,
+		IssueNum: issueResp.Number,
+		Message:  "Issue created successfully",
+	}, nil
 }
 
 

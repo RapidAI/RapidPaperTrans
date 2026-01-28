@@ -30,13 +30,19 @@ let OpenPDFFileDialog, LoadPDF, TranslatePDF, GetPDFStatus, CancelPDFTranslation
 let ListTranslatedPapers, DeleteTranslatedPaper, RetranslateFromArxiv, OpenPaperResult, ContinueTranslation;
 
 // GitHub Share bindings
-let CheckShareStatus, ShareToGitHub, TestGitHubConnection, CheckShareStatusForPaper, SharePaperToGitHub;
+let CheckShareStatus, ShareToGitHub, TestGitHubConnection, CheckShareStatusForPaper, SharePaperToGitHub, CheckShareStatusWithCategory;
 
 // GitHub Search bindings
-let SearchGitHubTranslation, DownloadGitHubTranslation, ListRecentGitHubTranslations, GetArxivPaperMetadata, UpdateGitHubToken;
+let SearchGitHubTranslation, DownloadGitHubTranslation, ListRecentGitHubTranslations, ListGitHubTranslationsByCategories, GetArxivPaperMetadata, UpdateGitHubToken;
 
 // Error Management bindings
-let ListErrors, RetryFromError, ClearError, ClearAllErrors, ExportErrorsToFile, ExportErrorIDsToFile;
+let ListErrors, RetryFromError, ClearError, ClearAllErrors, ExportErrorsToFile, ExportErrorIDsToFile, ReportErrorsToGitHub;
+
+// Paper Categories binding
+let GetPaperCategories;
+
+// Paper categories cache
+let paperCategories = [];
 
 // Try to import the backend bindings
 async function initBindings() {
@@ -81,10 +87,12 @@ async function initBindings() {
         TestGitHubConnection = App.TestGitHubConnection;
         CheckShareStatusForPaper = App.CheckShareStatusForPaper;
         SharePaperToGitHub = App.SharePaperToGitHub;
+        CheckShareStatusWithCategory = App.CheckShareStatusWithCategory;
         // GitHub Search bindings
         SearchGitHubTranslation = App.SearchGitHubTranslation;
         DownloadGitHubTranslation = App.DownloadGitHubTranslation;
         ListRecentGitHubTranslations = App.ListRecentGitHubTranslations;
+        ListGitHubTranslationsByCategories = App.ListGitHubTranslationsByCategories;
         GetArxivPaperMetadata = App.GetArxivPaperMetadata;
         UpdateGitHubToken = App.UpdateGitHubToken;
         // Error Management bindings
@@ -94,6 +102,9 @@ async function initBindings() {
         ClearAllErrors = App.ClearAllErrors;
         ExportErrorsToFile = App.ExportErrorsToFile;
         ExportErrorIDsToFile = App.ExportErrorIDsToFile;
+        ReportErrorsToGitHub = App.ReportErrorsToGitHub;
+        // Paper Categories binding
+        GetPaperCategories = App.GetPaperCategories;
         return true;
     } catch (error) {
         console.warn('Backend bindings not available yet:', error);
@@ -188,6 +199,10 @@ async function initBindings() {
             console.log('Mock ListRecentGitHubTranslations called with:', maxCount);
             return [];
         };
+        ListGitHubTranslationsByCategories = async (categories, maxCount) => {
+            console.log('Mock ListGitHubTranslationsByCategories called with:', categories, maxCount);
+            return [];
+        };
         GetArxivPaperMetadata = async (arxivId) => {
             console.log('Mock GetArxivPaperMetadata called with:', arxivId);
             return { arxiv_id: arxivId, title: 'Mock Title', abstract: 'Mock abstract', authors: 'Mock Authors' };
@@ -218,6 +233,19 @@ async function initBindings() {
         ExportErrorIDsToFile = async () => {
             console.log('Mock ExportErrorIDsToFile called');
             return '/path/to/exported/ids.txt';
+        };
+        ReportErrorsToGitHub = async () => {
+            console.log('Mock ReportErrorsToGitHub called');
+            return { success: true, issue_url: 'https://github.com/example/repo/issues/1', issue_number: 1 };
+        };
+        // Mock Paper Categories function
+        GetPaperCategories = async () => {
+            console.log('Mock GetPaperCategories called');
+            return [
+                { id: 'llm', name: '大语言模型', description: 'GPT、LLaMA、Claude等' },
+                { id: 'cv', name: '计算机视觉', description: '图像识别、目标检测等' },
+                { id: 'other', name: '其他', description: '其他AI相关论文' }
+            ];
         };
         return false;
     }
@@ -290,6 +318,8 @@ let shareChineseStatus;
 let shareBilingualStatus;
 let shareWarning;
 let shareProgress;
+let shareCategory;
+let shareCategoryHint;
 
 // GitHub settings elements
 let settingGitHubToken;
@@ -297,6 +327,9 @@ let btnUpdateGitHubToken;
 let btnTestGitHub;
 let githubTestStatus;
 let githubUpdateStatus;
+
+// Settings - share prompt
+let settingSharePrompt;
 
 // Default GitHub repository settings
 const DEFAULT_GITHUB_OWNER = 'rapidaicoder';
@@ -321,6 +354,8 @@ let btnPrevPage;
 let btnNextPage;
 let btnLastPage;
 let currentPageSpan;
+let libraryFilter;
+let categoryFilterTags;
 let totalPagesSpan;
 let totalPapersSpan;
 
@@ -342,6 +377,12 @@ let downloadProgressText;
 let btnDownloadCancel;
 let btnDownloadConfirm;
 
+// Share Prompt Modal elements
+let sharePromptModal;
+let sharePromptModalClose;
+let btnSharePromptCancel;
+let btnSharePromptConfirm;
+
 // Translate Confirm Modal elements
 let translateConfirmModal;
 let translateConfirmModalClose;
@@ -352,6 +393,15 @@ let previewAuthors;
 let btnTranslateCancel;
 let btnTranslateConfirm;
 let pendingTranslateArxivId = null;
+
+// Generic Confirm Modal elements (for custom confirm dialogs)
+let genericConfirmModal;
+let genericConfirmTitle;
+let genericConfirmMessage;
+let genericConfirmModalClose;
+let btnGenericCancel;
+let btnGenericConfirm;
+let genericConfirmResolve = null;
 
 // Current download state
 let currentDownloadData = null;
@@ -430,6 +480,9 @@ let pdfModeRightPdf = null;   // PDF 模式右侧 PDF 路径
 let latexModeStatus = { phase: 'idle', progress: 0, message: '就绪', error: null };
 let pdfModeStatus = { phase: 'idle', progress: 0, message: '就绪', error: null };
 
+// Library browser state
+let selectedCategories = ['all']; // Selected category filters for library browser
+
 // Toast container element
 let toastContainer;
 
@@ -457,6 +510,47 @@ function showToast(message, type = 'info', duration = 3000) {
             toast.remove();
         }, 300);
     }, duration);
+}
+
+/**
+ * Show a custom confirm dialog
+ * @param {string} message - Confirm message
+ * @param {string} title - Dialog title (optional)
+ * @param {string} confirmText - Confirm button text (optional)
+ * @param {string} cancelText - Cancel button text (optional)
+ * @returns {Promise<boolean>} - User choice result
+ */
+function showConfirmDialog(message, title = '确认', confirmText = '确定', cancelText = '取消') {
+    return new Promise((resolve) => {
+        if (!genericConfirmModal) {
+            // Fallback to native confirm if modal not available
+            resolve(confirm(message));
+            return;
+        }
+
+        genericConfirmResolve = resolve;
+        
+        if (genericConfirmTitle) genericConfirmTitle.textContent = title;
+        if (genericConfirmMessage) genericConfirmMessage.textContent = message;
+        if (btnGenericConfirm) btnGenericConfirm.textContent = confirmText;
+        if (btnGenericCancel) btnGenericCancel.textContent = cancelText;
+        
+        genericConfirmModal.classList.add('visible');
+    });
+}
+
+/**
+ * Close generic confirm dialog
+ * @param {boolean} result - User choice result
+ */
+function closeGenericConfirm(result) {
+    if (genericConfirmModal) {
+        genericConfirmModal.classList.remove('visible');
+    }
+    if (genericConfirmResolve) {
+        genericConfirmResolve(result);
+        genericConfirmResolve = null;
+    }
 }
 
 /**
@@ -546,6 +640,8 @@ function initElements() {
     shareBilingualStatus = document.getElementById('share-bilingual-status');
     shareWarning = document.getElementById('share-warning');
     shareProgress = document.getElementById('share-progress');
+    shareCategory = document.getElementById('share-category');
+    shareCategoryHint = document.getElementById('share-category-hint');
 
     // GitHub settings elements
     settingGitHubToken = document.getElementById('setting-github-token');
@@ -553,6 +649,9 @@ function initElements() {
     btnTestGitHub = document.getElementById('btn-test-github');
     githubTestStatus = document.getElementById('github-test-status');
     githubUpdateStatus = document.getElementById('github-update-status');
+
+    // Settings - share prompt
+    settingSharePrompt = document.getElementById('setting-share-prompt');
 
     // Startup check modal elements
     startupCheckModal = document.getElementById('startup-check-modal');
@@ -606,6 +705,8 @@ function initElements() {
     currentPageSpan = document.getElementById('current-page');
     totalPagesSpan = document.getElementById('total-pages');
     totalPapersSpan = document.getElementById('total-papers');
+    libraryFilter = document.getElementById('library-filter');
+    categoryFilterTags = document.getElementById('category-filter-tags');
 
     // GitHub Download Modal elements
     githubDownloadModal = document.getElementById('github-download-modal');
@@ -625,6 +726,12 @@ function initElements() {
     btnDownloadCancel = document.getElementById('btn-download-cancel');
     btnDownloadConfirm = document.getElementById('btn-download-confirm');
 
+    // Share Prompt Modal elements
+    sharePromptModal = document.getElementById('share-prompt-modal');
+    sharePromptModalClose = document.getElementById('share-prompt-modal-close');
+    btnSharePromptCancel = document.getElementById('btn-share-prompt-cancel');
+    btnSharePromptConfirm = document.getElementById('btn-share-prompt-confirm');
+
     // Translate Confirm Modal elements
     translateConfirmModal = document.getElementById('translate-confirm-modal');
     translateConfirmModalClose = document.getElementById('translate-confirm-modal-close');
@@ -634,6 +741,14 @@ function initElements() {
     previewAuthors = document.getElementById('preview-authors');
     btnTranslateCancel = document.getElementById('btn-translate-cancel');
     btnTranslateConfirm = document.getElementById('btn-translate-confirm');
+
+    // Generic Confirm Modal elements
+    genericConfirmModal = document.getElementById('generic-confirm-modal');
+    genericConfirmTitle = document.getElementById('generic-confirm-title');
+    genericConfirmMessage = document.getElementById('generic-confirm-message');
+    genericConfirmModalClose = document.getElementById('generic-confirm-modal-close');
+    btnGenericCancel = document.getElementById('btn-generic-cancel');
+    btnGenericConfirm = document.getElementById('btn-generic-confirm');
 }
 
 /**
@@ -803,6 +918,16 @@ function setupEventListeners() {
         }
     });
 
+    // Share Prompt Modal event listeners
+    sharePromptModalClose.addEventListener('click', closeSharePromptModal);
+    btnSharePromptCancel.addEventListener('click', closeSharePromptModal);
+    btnSharePromptConfirm.addEventListener('click', confirmSharePrompt);
+    sharePromptModal.addEventListener('mousedown', (e) => {
+        if (e.target === sharePromptModal) {
+            closeSharePromptModal();
+        }
+    });
+
     // Translate Confirm Modal event listeners
     translateConfirmModalClose.addEventListener('click', closeTranslateConfirmModal);
     btnTranslateCancel.addEventListener('click', closeTranslateConfirmModal);
@@ -812,6 +937,24 @@ function setupEventListeners() {
             closeTranslateConfirmModal();
         }
     });
+
+    // Generic Confirm Modal event listeners
+    if (genericConfirmModalClose) {
+        genericConfirmModalClose.addEventListener('click', () => closeGenericConfirm(false));
+    }
+    if (btnGenericCancel) {
+        btnGenericCancel.addEventListener('click', () => closeGenericConfirm(false));
+    }
+    if (btnGenericConfirm) {
+        btnGenericConfirm.addEventListener('click', () => closeGenericConfirm(true));
+    }
+    if (genericConfirmModal) {
+        genericConfirmModal.addEventListener('mousedown', (e) => {
+            if (e.target === genericConfirmModal) {
+                closeGenericConfirm(false);
+            }
+        });
+    }
 }
 
 /**
@@ -899,15 +1042,33 @@ async function handleProcess() {
         const existingInfo = await CheckExistingTranslation(input);
 
         if (existingInfo && existingInfo.exists) {
-            // Show confirmation dialog
+            // Show confirmation dialog based on status
             let confirmMsg = existingInfo.message + '\n\n';
+            let dialogTitle = '发现已有翻译';
+            let confirmText = '确定';
+            let cancelText = '取消';
+            
             if (existingInfo.is_complete) {
-                confirmMsg += '是否要重新翻译？（这将覆盖现有结果）\n\n点击"确定"重新翻译，点击"取消"查看现有结果';
+                // Translation completed successfully
+                confirmMsg += '是否要重新翻译？（这将覆盖现有结果）';
+                dialogTitle = '📄 发现已完成的翻译';
+                confirmText = '重新翻译';
+                cancelText = '查看现有结果';
             } else if (existingInfo.can_continue) {
-                confirmMsg += '是否要继续翻译？\n\n点击"确定"继续，点击"取消"重新开始';
+                // Translation was interrupted, can continue
+                confirmMsg += '是否要继续翻译？';
+                dialogTitle = '📄 发现未完成的翻译';
+                confirmText = '继续翻译';
+                cancelText = '重新开始';
+            } else {
+                // Translation failed previously
+                confirmMsg += '是否要重新尝试翻译？';
+                dialogTitle = '❌ 发现翻译失败的记录';
+                confirmText = '重新翻译';
+                cancelText = '放弃';
             }
 
-            const userChoice = confirm(confirmMsg);
+            const userChoice = await showConfirmDialog(confirmMsg, dialogTitle, confirmText, cancelText);
 
             if (existingInfo.is_complete && !userChoice) {
                 // User wants to view existing result
@@ -930,11 +1091,25 @@ async function handleProcess() {
                 return;
             }
 
+            // For failed translations, if user chooses "放弃", just return
+            if (!existingInfo.is_complete && !existingInfo.can_continue && !userChoice) {
+                showToast('已取消翻译', 'info');
+                return;
+            }
+
             // User wants to re-translate or continue
             // Update UI to processing state
             setProcessingState(true);
             resetPDFViewers();
-            updateStatus('idle', 0, userChoice ? '开始处理...' : '继续翻译...');
+            
+            if (existingInfo.is_complete) {
+                updateStatus('idle', 0, '开始重新翻译...');
+            } else if (existingInfo.can_continue && userChoice) {
+                updateStatus('idle', 0, '继续翻译...');
+            } else {
+                updateStatus('idle', 0, '开始重新翻译...');
+            }
+            
             startStatusPolling();
 
             // Call backend with force option
@@ -981,7 +1156,7 @@ async function handleProcess() {
 /**
  * Handle the process result
  */
-function handleProcessResult(result) {
+async function handleProcessResult(result) {
     if (result) {
         // Store the result for download
         currentResult = result;
@@ -1004,8 +1179,59 @@ function handleProcessResult(result) {
         }
 
         showToast('处理完成，可以下载结果', 'success');
+        
+        // Check if share prompt is enabled and prompt user to share
+        try {
+            const settings = await GetSettings();
+            if (settings.share_prompt_enabled !== false) {
+                // Delay a bit to let user see the result first
+                setTimeout(() => {
+                    promptShareAfterTranslation();
+                }, 1000);
+            }
+        } catch (error) {
+            console.warn('Failed to check share prompt setting:', error);
+        }
     }
     setProcessingState(false);
+}
+
+/**
+ * Prompt user to share after successful translation
+ */
+async function promptShareAfterTranslation() {
+    // Check if we can share (has GitHub token, is arXiv paper, etc.)
+    try {
+        const status = await CheckShareStatus();
+        if (status.can_share) {
+            // Show custom share prompt modal
+            openSharePromptModal();
+        }
+    } catch (error) {
+        console.warn('Failed to check share status for prompt:', error);
+    }
+}
+
+/**
+ * Open share prompt modal
+ */
+function openSharePromptModal() {
+    sharePromptModal.classList.add('visible');
+}
+
+/**
+ * Close share prompt modal
+ */
+function closeSharePromptModal() {
+    sharePromptModal.classList.remove('visible');
+}
+
+/**
+ * Handle share prompt confirmation
+ */
+function confirmSharePrompt() {
+    closeSharePromptModal();
+    openShare();
 }
 
 /**
@@ -1238,6 +1464,9 @@ async function openSettings() {
         settingWorkdir.value = settings.work_directory || '';
         settingConcurrency.value = settings.concurrency || 3;
         settingLibraryPageSize.value = settings.library_page_size || 20;
+        
+        // Share prompt setting (default to true if not set)
+        settingSharePrompt.checked = settings.share_prompt_enabled !== false;
 
         // GitHub settings (only token, owner and repo use defaults)
         settingGitHubToken.value = settings.github_token || '';
@@ -1509,7 +1738,13 @@ async function sharePaper(arxivId) {
  * Re-translate a paper from arXiv
  */
 async function retranslatePaper(arxivId) {
-    if (!confirm(`确定要重新翻译论文 ${arxivId} 吗？\n这将从 arXiv 下载最新版本并重新翻译。`)) {
+    const confirmed = await showConfirmDialog(
+        `确定要重新翻译论文 ${arxivId} 吗？\n\n这将从 arXiv 下载最新版本并重新翻译。`,
+        '🔄 重新翻译',
+        '重新翻译',
+        '取消'
+    );
+    if (!confirmed) {
         return;
     }
 
@@ -1593,7 +1828,13 @@ async function continuePaper(arxivId) {
  * Delete a translated paper
  */
 async function deletePaper(arxivId, itemElement) {
-    if (!confirm(`确定要删除论文 ${arxivId} 吗？\n此操作不可恢复。`)) {
+    const confirmed = await showConfirmDialog(
+        `确定要删除论文 ${arxivId} 吗？\n\n此操作不可恢复。`,
+        '🗑️ 删除论文',
+        '删除',
+        '取消'
+    );
+    if (!confirmed) {
         return;
     }
 
@@ -1622,41 +1863,52 @@ async function openShare() {
         // Clear any stored arxivId (this is for sharing from main view)
         currentShareArxivId = null;
 
-        // Check share status
+        // Load categories if not loaded
+        if (paperCategories.length === 0) {
+            paperCategories = await GetPaperCategories();
+        }
+        
+        // Populate category select
+        populateCategorySelect(shareCategory, paperCategories);
+        
+        // Check share status first to get base file names
         const status = await CheckShareStatus();
 
         if (!status.can_share) {
             showToast(status.message, 'warning');
             return;
         }
+        
+        // Store base arXiv ID for file name generation
+        const baseChineseName = status.chinese_pdf_path;
+        const baseBilingualName = status.bilingual_pdf_path;
+        
+        // Add change event to show description, update file names, and check file status
+        shareCategory.onchange = async () => {
+            const selectedId = shareCategory.value;
+            const category = paperCategories.find(c => c.id === selectedId);
+            shareCategoryHint.textContent = category ? category.description : '';
+            updateShareFileNames(baseChineseName, baseBilingualName);
+            
+            // Check file status for the selected category
+            if (selectedId) {
+                try {
+                    const categoryStatus = await CheckShareStatusWithCategory(selectedId);
+                    updateShareFileStatus(categoryStatus);
+                } catch (error) {
+                    console.warn('Failed to check category status:', error);
+                }
+            } else {
+                // Reset to initial status when no category selected
+                updateShareFileStatus(status);
+            }
+        };
 
-        // Update file names
-        shareChineseName.textContent = status.chinese_pdf_path;
-        shareBilingualName.textContent = status.bilingual_pdf_path;
+        // Update file names (will be updated when category is selected)
+        updateShareFileNames(baseChineseName, baseBilingualName);
 
         // Update status badges
-        if (status.chinese_pdf_exists) {
-            shareChineseStatus.textContent = '已存在';
-            shareChineseStatus.className = 'file-status exists';
-        } else {
-            shareChineseStatus.textContent = '新文件';
-            shareChineseStatus.className = 'file-status new';
-        }
-
-        if (status.bilingual_pdf_exists) {
-            shareBilingualStatus.textContent = '已存在';
-            shareBilingualStatus.className = 'file-status exists';
-        } else {
-            shareBilingualStatus.textContent = '新文件';
-            shareBilingualStatus.className = 'file-status new';
-        }
-
-        // Show warning if any file exists
-        if (status.chinese_pdf_exists || status.bilingual_pdf_exists) {
-            shareWarning.style.display = 'flex';
-        } else {
-            shareWarning.style.display = 'none';
-        }
+        updateShareFileStatus(status);
 
         // Reset checkboxes
         shareChineseCheck.checked = true;
@@ -1675,6 +1927,65 @@ async function openShare() {
 }
 
 /**
+ * Populate category select dropdown
+ */
+function populateCategorySelect(selectElement, categories) {
+    selectElement.innerHTML = '<option value="">-- 请选择类别 --</option>';
+    for (const cat of categories) {
+        const option = document.createElement('option');
+        option.value = cat.id;
+        option.textContent = cat.name;
+        option.title = cat.description;
+        selectElement.appendChild(option);
+    }
+}
+
+/**
+ * Update share file names based on selected category
+ */
+function updateShareFileNames(baseChinese, baseBilingual) {
+    const categoryId = shareCategory.value;
+    if (categoryId) {
+        // Extract arxiv ID from base path (e.g., "2401.12345_cn.pdf" -> "2401.12345")
+        const arxivMatch = baseChinese.match(/^([^_]+)/);
+        const arxivId = arxivMatch ? arxivMatch[1] : baseChinese.replace('_cn.pdf', '');
+        shareChineseName.textContent = `${arxivId}_${categoryId}_cn.pdf`;
+        shareBilingualName.textContent = `${arxivId}_${categoryId}_bilingual.pdf`;
+    } else {
+        shareChineseName.textContent = baseChinese;
+        shareBilingualName.textContent = baseBilingual;
+    }
+}
+
+/**
+ * Update share file status badges based on check result
+ */
+function updateShareFileStatus(status) {
+    if (status.chinese_pdf_exists) {
+        shareChineseStatus.textContent = '已存在';
+        shareChineseStatus.className = 'file-status exists';
+    } else {
+        shareChineseStatus.textContent = '新文件';
+        shareChineseStatus.className = 'file-status new';
+    }
+
+    if (status.bilingual_pdf_exists) {
+        shareBilingualStatus.textContent = '已存在';
+        shareBilingualStatus.className = 'file-status exists';
+    } else {
+        shareBilingualStatus.textContent = '新文件';
+        shareBilingualStatus.className = 'file-status new';
+    }
+
+    // Show warning if any file exists
+    if (status.chinese_pdf_exists || status.bilingual_pdf_exists) {
+        shareWarning.style.display = 'flex';
+    } else {
+        shareWarning.style.display = 'none';
+    }
+}
+
+/**
  * Close the share modal
  */
 function closeShare() {
@@ -1686,8 +1997,14 @@ function closeShare() {
  * Confirm and execute the share operation
  */
 async function confirmShare() {
+    const categoryId = shareCategory.value;
     const uploadChinese = shareChineseCheck.checked;
     const uploadBilingual = shareBilingualCheck.checked;
+
+    if (!categoryId) {
+        showToast('请选择论文类别', 'warning');
+        return;
+    }
 
     if (!uploadChinese && !uploadBilingual) {
         showToast('请至少选择一个文件上传', 'warning');
@@ -1703,10 +2020,10 @@ async function confirmShare() {
 
         // If we have a specific arxivId (from results list), use SharePaperToGitHub
         if (currentShareArxivId) {
-            result = await SharePaperToGitHub(currentShareArxivId, uploadChinese, uploadBilingual);
+            result = await SharePaperToGitHub(currentShareArxivId, categoryId, uploadChinese, uploadBilingual);
         } else {
             // Otherwise use the current result (from main view)
-            result = await ShareToGitHub(uploadChinese, uploadBilingual);
+            result = await ShareToGitHub(categoryId, uploadChinese, uploadBilingual);
         }
 
         if (result.success) {
@@ -2033,7 +2350,10 @@ async function saveSettings() {
             libraryPageSize = 20;
         }
         
-        console.log('Saving settings with libraryPageSize:', libraryPageSize);
+        // Share prompt setting
+        const sharePromptEnabled = settingSharePrompt.checked;
+        
+        console.log('Saving settings with libraryPageSize:', libraryPageSize, 'sharePromptEnabled:', sharePromptEnabled);
 
         // GitHub settings (use defaults for owner and repo)
         const githubToken = settingGitHubToken.value.trim();
@@ -2041,7 +2361,7 @@ async function saveSettings() {
         const githubRepo = DEFAULT_GITHUB_REPO;
 
         // Save to backend
-        await SaveSettings(apiKey, baseUrl, model, contextWindow, compiler, workDir, concurrency, githubToken, githubOwner, githubRepo, libraryPageSize);
+        await SaveSettings(apiKey, baseUrl, model, contextWindow, compiler, workDir, concurrency, githubToken, githubOwner, githubRepo, libraryPageSize, sharePromptEnabled);
 
         // Close modal
         closeSettings();
@@ -2074,7 +2394,39 @@ async function init() {
         ClearError,
         ClearAllErrors,
         ExportErrorsToFile,
-        ExportErrorIDsToFile
+        ExportErrorIDsToFile,
+        ReportErrorsToGitHub,
+        // 重试时更新输入框并启动状态轮询
+        onRetryUpdateInput: (input) => {
+            // 更新输入框
+            if (inputSource) {
+                inputSource.value = input;
+            }
+            // 设置处理状态
+            setProcessingState(true);
+            resetPDFViewers();
+            updateStatus('idle', 0, '重试翻译中...');
+            // 启动状态轮询
+            startStatusPolling();
+        },
+        // 重试完成回调
+        onRetryComplete: (result, error) => {
+            // 停止状态轮询
+            stopStatusPolling();
+            
+            if (error) {
+                // 重试失败
+                const errorMsg = error.message || error.toString() || '重试失败';
+                updateStatus('error', 0, errorMsg);
+                setProcessingState(false);
+            } else if (result) {
+                // 重试成功，处理结果
+                handleProcessResult(result);
+            } else {
+                // 没有结果也没有错误
+                setProcessingState(false);
+            }
+        }
     });
 
     // Set up event listeners
@@ -3154,6 +3506,14 @@ async function openBrowseLibrary() {
     libraryEmpty.style.display = 'none';
 
     try {
+        // Load categories if not loaded
+        if (paperCategories.length === 0) {
+            paperCategories = await GetPaperCategories();
+        }
+        
+        // Initialize category filter tags
+        initCategoryFilterTags();
+        
         // Load page size from settings
         const settings = await GetSettings();
         console.log('Loaded settings:', settings);
@@ -3177,14 +3537,13 @@ async function openBrowseLibrary() {
 
         // Store all papers
         allPapers = papers;
-        currentPage = 1;
-        totalPages = Math.ceil(allPapers.length / pageSize);
-
-        // Update total papers count
-        totalPapersSpan.textContent = allPapers.length;
-
-        // Render first page
-        renderCurrentPage();
+        
+        // Reset category filter
+        selectedCategories = ['all'];
+        updateCategoryFilterUI();
+        
+        // Apply filter and render (sync for 'all' category)
+        await applyLibraryFilter();
 
         // Show content
         libraryLoading.style.display = 'none';
@@ -3199,18 +3558,175 @@ async function openBrowseLibrary() {
 }
 
 /**
- * Render current page of papers
+ * Initialize category filter tags
  */
-function renderCurrentPage() {
+function initCategoryFilterTags() {
+    categoryFilterTags.innerHTML = '';
+    
+    // Add "All" tag
+    const allTag = document.createElement('span');
+    allTag.className = 'category-tag selected';
+    allTag.dataset.category = 'all';
+    allTag.textContent = '全部';
+    allTag.onclick = () => toggleCategoryFilter('all');
+    categoryFilterTags.appendChild(allTag);
+    
+    // Add category tags
+    for (const cat of paperCategories) {
+        const tag = document.createElement('span');
+        tag.className = 'category-tag';
+        tag.dataset.category = cat.id;
+        tag.textContent = cat.name;
+        tag.title = cat.description;
+        tag.onclick = () => toggleCategoryFilter(cat.id);
+        categoryFilterTags.appendChild(tag);
+    }
+}
+
+/**
+ * Toggle category filter selection
+ */
+function toggleCategoryFilter(categoryId) {
+    if (categoryId === 'all') {
+        // If clicking "all", clear other selections
+        selectedCategories = ['all'];
+    } else {
+        // Remove "all" if it's selected
+        const allIndex = selectedCategories.indexOf('all');
+        if (allIndex > -1) {
+            selectedCategories.splice(allIndex, 1);
+        }
+        
+        // Toggle this category
+        const index = selectedCategories.indexOf(categoryId);
+        if (index > -1) {
+            selectedCategories.splice(index, 1);
+        } else {
+            selectedCategories.push(categoryId);
+        }
+        
+        // If no categories selected, select "all"
+        if (selectedCategories.length === 0) {
+            selectedCategories = ['all'];
+        }
+    }
+    
+    updateCategoryFilterUI();
+    applyLibraryFilter();
+}
+
+/**
+ * Update category filter UI to reflect current selection
+ */
+function updateCategoryFilterUI() {
+    const tags = categoryFilterTags.querySelectorAll('.category-tag');
+    tags.forEach(tag => {
+        const catId = tag.dataset.category;
+        if (selectedCategories.includes(catId)) {
+            tag.classList.add('selected');
+        } else {
+            tag.classList.remove('selected');
+        }
+    });
+}
+
+/**
+ * Extract category ID from filename
+ * Format: arxivid_categoryid_cn.pdf or arxivid_categoryid_bilingual.pdf
+ */
+function extractCategoryFromFilename(filename) {
+    if (!filename) return null;
+    
+    // Match pattern: something_categoryid_cn.pdf or something_categoryid_bilingual.pdf
+    const match = filename.match(/_([a-z0-9]+)_(cn|bilingual)\.pdf$/i);
+    if (match) {
+        const potentialCatId = match[1];
+        // Check if it's a valid category
+        if (paperCategories.some(c => c.id === potentialCatId)) {
+            return potentialCatId;
+        }
+    }
+    return null;
+}
+
+/**
+ * Apply library filter and update display
+ * When categories are selected (not "all"), fetches from backend API
+ */
+async function applyLibraryFilter() {
+    // If "all" is selected, use the cached allPapers
+    if (selectedCategories.includes('all')) {
+        window._filteredPapers = allPapers;
+        currentPage = 1;
+        totalPages = Math.ceil(allPapers.length / pageSize) || 1;
+        totalPapersSpan.textContent = allPapers.length;
+        renderCurrentPageFiltered();
+        return;
+    }
+    
+    // Show loading state
+    libraryLoading.style.display = 'block';
+    libraryContent.style.display = 'none';
+    
+    try {
+        // Fetch papers filtered by categories from backend
+        const filteredPapers = await ListGitHubTranslationsByCategories(selectedCategories, 1000);
+        
+        // Update pagination
+        currentPage = 1;
+        totalPages = Math.ceil(filteredPapers.length / pageSize) || 1;
+        
+        // Update total papers count
+        totalPapersSpan.textContent = filteredPapers.length;
+        
+        // Store filtered papers for rendering
+        window._filteredPapers = filteredPapers;
+        
+        // Hide loading, show content
+        libraryLoading.style.display = 'none';
+        
+        if (filteredPapers.length === 0) {
+            libraryEmpty.style.display = 'block';
+            libraryContent.style.display = 'none';
+        } else {
+            libraryEmpty.style.display = 'none';
+            libraryContent.style.display = 'flex';
+            renderCurrentPageFiltered();
+        }
+    } catch (error) {
+        console.error('Failed to filter library by categories:', error);
+        showToast('筛选失败: ' + (error.message || error), 'error');
+        libraryLoading.style.display = 'none';
+        libraryContent.style.display = 'flex';
+        // Fall back to local filtering
+        const filteredPapers = allPapers.filter(paper => {
+            const catId = extractCategoryFromFilename(paper.chinese_pdf) || 
+                          extractCategoryFromFilename(paper.bilingual_pdf);
+            return catId && selectedCategories.includes(catId);
+        });
+        window._filteredPapers = filteredPapers;
+        currentPage = 1;
+        totalPages = Math.ceil(filteredPapers.length / pageSize) || 1;
+        totalPapersSpan.textContent = filteredPapers.length;
+        renderCurrentPageFiltered();
+    }
+}
+
+/**
+ * Render current page of filtered papers
+ */
+function renderCurrentPageFiltered() {
+    const filteredPapers = window._filteredPapers || allPapers;
+    
     // Clear existing list
     libraryList.innerHTML = '';
 
     // Calculate start and end indices
     const startIndex = (currentPage - 1) * pageSize;
-    const endIndex = Math.min(startIndex + pageSize, allPapers.length);
+    const endIndex = Math.min(startIndex + pageSize, filteredPapers.length);
 
     // Get papers for current page
-    const pagePapers = allPapers.slice(startIndex, endIndex);
+    const pagePapers = filteredPapers.slice(startIndex, endIndex);
 
     // Render each paper
     for (const paper of pagePapers) {
@@ -3222,6 +3738,14 @@ function renderCurrentPage() {
 
     // Scroll to top of list
     libraryList.scrollTop = 0;
+}
+
+/**
+ * Render current page of papers
+ */
+function renderCurrentPage() {
+    // Use filtered rendering
+    renderCurrentPageFiltered();
 }
 
 /**

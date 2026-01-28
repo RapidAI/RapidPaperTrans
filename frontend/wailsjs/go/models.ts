@@ -63,6 +63,9 @@ export namespace errors {
 	    retry_count: number;
 	    // Go type: time
 	    last_retry: any;
+	    reported: boolean;
+	    // Go type: time
+	    reported_at: any;
 	
 	    static createFrom(source: any = {}) {
 	        return new ErrorRecord(source);
@@ -79,6 +82,8 @@ export namespace errors {
 	        this.can_retry = source["can_retry"];
 	        this.retry_count = source["retry_count"];
 	        this.last_retry = this.convertValues(source["last_retry"], null);
+	        this.reported = source["reported"];
+	        this.reported_at = this.convertValues(source["reported_at"], null);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -132,6 +137,24 @@ export namespace github {
 	        this.has_chinese = source["has_chinese"];
 	        this.has_bilingual = source["has_bilingual"];
 	        this.has_latex = source["has_latex"];
+	    }
+	}
+	export class IssueCreateResult {
+	    success: boolean;
+	    issue_url: string;
+	    issue_number: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new IssueCreateResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.issue_url = source["issue_url"];
+	        this.issue_number = source["issue_number"];
+	        this.message = source["message"];
 	    }
 	}
 	export class TranslationSearchResult {
@@ -473,6 +496,7 @@ export namespace types {
 	    github_owner: string;
 	    github_repo: string;
 	    library_page_size: number;
+	    share_prompt_enabled: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -492,6 +516,23 @@ export namespace types {
 	        this.github_owner = source["github_owner"];
 	        this.github_repo = source["github_repo"];
 	        this.library_page_size = source["library_page_size"];
+	        this.share_prompt_enabled = source["share_prompt_enabled"];
+	    }
+	}
+	export class PaperCategory {
+	    id: string;
+	    name: string;
+	    description: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PaperCategory(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.name = source["name"];
+	        this.description = source["description"];
 	    }
 	}
 	export class SourceInfo {

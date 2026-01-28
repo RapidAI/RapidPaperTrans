@@ -591,16 +591,16 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	}()
 
 	// Reset status to idle at the start
-	a.updateStatus(types.PhaseIdle, 0, "开始处?..")
+	a.updateStatus(types.PhaseIdle, 0, "开始处理...")
 
 	// Step 1: Parse input to determine source type
-	a.updateStatus(types.PhaseDownloading, 5, "...")
+	a.updateStatus(types.PhaseDownloading, 5, "解析输入...")
 	logger.Debug("parsing input")
 
 	sourceType, err := parser.ParseInput(input)
 	if err != nil {
 		logger.Error("input parsing failed", err, logger.String("input", input))
-		a.updateStatusError(fmt.Sprintf("ʧ: %v", err))
+		a.updateStatusError(fmt.Sprintf("下载失败: %v", err))
 		return nil, err
 	}
 
@@ -609,8 +609,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 2: Download/extract source code based on type
@@ -618,34 +618,34 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 
 	switch sourceType {
 	case types.SourceTypeURL:
-		a.updateStatus(types.PhaseDownloading, 10, " URL Դ...")
+		a.updateStatus(types.PhaseDownloading, 10, "下载 URL 源码...")
 		logger.Info("downloading from URL", logger.String("url", input))
 		sourceInfo, err = a.downloader.DownloadFromURL(input)
 		if err != nil {
 			logger.Error("download from URL failed", err, logger.String("url", input))
-			a.updateStatusError(fmt.Sprintf("ʧ: %v", err))
+			a.updateStatusError(fmt.Sprintf("下载失败: %v", err))
 			return nil, err
 		}
 
 		// Extract the downloaded archive
-		a.updateStatus(types.PhaseExtracting, 20, "ѹԴ...")
+		a.updateStatus(types.PhaseExtracting, 20, "解压源码...")
 		logger.Debug("extracting downloaded archive")
 		sourceInfo, err = a.downloader.ExtractZip(sourceInfo.ExtractDir)
 		if err != nil {
 			logger.Error("extraction failed", err)
-			a.updateStatusError(fmt.Sprintf("ѹʧ: %v", err))
+			a.updateStatusError(fmt.Sprintf("解压失败: %v", err))
 			return nil, err
 		}
 		sourceInfo.SourceType = types.SourceTypeURL
 		sourceInfo.OriginalRef = input
 
 	case types.SourceTypeArxivID:
-		a.updateStatus(types.PhaseDownloading, 10, " arXiv Դ...")
+		a.updateStatus(types.PhaseDownloading, 10, "下载 arXiv 源码...")
 		logger.Info("downloading by arXiv ID", logger.String("arxivID", input))
 		sourceInfo, err = a.downloader.DownloadByID(input)
 		if err != nil {
 			logger.Error("download by ID failed", err, logger.String("arxivID", input))
-			a.updateStatusError(fmt.Sprintf("ʧ: %v", err))
+			a.updateStatusError(fmt.Sprintf("下载失败: %v", err))
 			// 记录下载错误
 			arxivID := results.ExtractArxivID(input)
 			if arxivID != "" {
@@ -655,12 +655,12 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		}
 
 		// Extract the downloaded archive
-		a.updateStatus(types.PhaseExtracting, 20, "ѹԴ...")
+		a.updateStatus(types.PhaseExtracting, 20, "解压源码...")
 		logger.Debug("extracting downloaded archive")
 		sourceInfo, err = a.downloader.ExtractZip(sourceInfo.ExtractDir)
 		if err != nil {
 			logger.Error("extraction failed", err)
-			a.updateStatusError(fmt.Sprintf("ѹʧ: %v", err))
+			a.updateStatusError(fmt.Sprintf("解压失败: %v", err))
 			// 记录解压错误
 			arxivID := results.ExtractArxivID(input)
 			if arxivID != "" {
@@ -677,7 +677,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		sourceInfo, err = a.downloader.ExtractZip(input)
 		if err != nil {
 			logger.Error("extraction failed", err, logger.String("path", input))
-			a.updateStatusError(fmt.Sprintf("ѹʧ: %v", err))
+			a.updateStatusError(fmt.Sprintf("解压失败: %v", err))
 			return nil, err
 		}
 
@@ -691,8 +691,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 2.5: Preprocess tex files to fix common issues
@@ -704,7 +704,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	}
 
 	// Step 3: Find main tex file
-	a.updateStatus(types.PhaseExtracting, 25, " tex ļ...")
+	a.updateStatus(types.PhaseExtracting, 25, "查找主 tex 文件...")
 	logger.Debug("finding main tex file", logger.String("extractDir", sourceInfo.ExtractDir))
 	mainTexFile, err := a.downloader.FindMainTexFile(sourceInfo.ExtractDir)
 	if err != nil {
@@ -750,8 +750,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 4: Compile original document to PDF
@@ -761,7 +761,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	originalResult, err := a.compiler.Compile(mainTexPath, originalOutputDir)
 	if err != nil {
 		logger.Error("original document compilation failed", err)
-		a.updateStatusError(fmt.Sprintf("原始文档ʧ: %v", err))
+		a.updateStatusError(fmt.Sprintf("原始文档编译失败: %v", err))
 		// Save intermediate result on error
 		if arxivID != "" {
 			a.saveIntermediateResult(arxivID, title, input, sourceInfo, results.StatusError, err.Error(), "", "")
@@ -771,7 +771,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		return nil, err
 	}
 	if !originalResult.Success {
-		err := types.NewAppErrorWithDetails(types.ErrCompile, "原始文档ʧ", originalResult.ErrorMsg, nil)
+		err := types.NewAppErrorWithDetails(types.ErrCompile, "原始文档编译失败", originalResult.ErrorMsg, nil)
 		logger.Error("original document compilation failed", err, logger.String("errorMsg", originalResult.ErrorMsg))
 		a.updateStatusError(err.Error())
 		// Save intermediate result on error
@@ -795,15 +795,15 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 5: Read and translate tex content
-	a.updateStatus(types.PhaseTranslating, 40, "ȡ tex ļ...")
+	a.updateStatus(types.PhaseTranslating, 40, "读取 tex 文件...")
 	logger.Debug("reading tex files for translation")
 
-	a.updateStatus(types.PhaseTranslating, 42, "ʼĵ...")
+	a.updateStatus(types.PhaseTranslating, 42, "开始翻译文档...")
 
 	// Translate main file and all input files
 	translatedFiles, totalTokens, err := a.translateAllTexFiles(mainTexPath, sourceInfo.ExtractDir, func(current, total int, message string) {
@@ -814,7 +814,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	})
 	if err != nil {
 		logger.Error("translation failed", err)
-		a.updateStatusError(fmt.Sprintf("ʧ: %v", err))
+		a.updateStatusError(fmt.Sprintf("下载失败: %v", err))
 		// Save intermediate result on translation error
 		if arxivID != "" {
 			a.saveIntermediateResult(arxivID, title, input, sourceInfo, results.StatusError, err.Error(), originalResult.PDFPath, "")
@@ -837,8 +837,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 6: Validate and fix syntax errors (only for main file)
@@ -888,8 +888,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Check for cancellation
 	if ctx.Err() != nil {
 		logger.Warn("processing cancelled")
-		a.updateStatusError("ȡ")
-		return nil, types.NewAppError(types.ErrInternal, "ȡ", ctx.Err())
+		a.updateStatusError("已取消")
+		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
 	}
 
 	// Step 7: Save all translated tex files
@@ -1046,6 +1046,21 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	} else {
 		bilingualPDFPath = bilingualOutputPath
 		logger.Info("bilingual PDF generated", logger.String("path", bilingualPDFPath))
+	}
+
+	// Step 9.5: Check page count difference (suspicious error detection)
+	a.updateStatus(types.PhaseCompiling, 98, "检查页数差异...")
+	pageCountResult := a.checkPageCountDifference(originalResult.PDFPath, translatedResult.PDFPath)
+	if pageCountResult != nil && pageCountResult.IsSuspicious {
+		// 记录可疑错误但不阻止流程
+		errorMsg := pdf.FormatPageCountError(pageCountResult)
+		logger.Warn("suspicious page count difference detected",
+			logger.Int("originalPages", pageCountResult.OriginalPages),
+			logger.Int("translatedPages", pageCountResult.TranslatedPages),
+			logger.Float64("diffPercent", pageCountResult.DiffPercent*100))
+		if arxivID != "" {
+			a.recordError(arxivID, title, input, errors.StagePageCountMismatch, errorMsg)
+		}
 	}
 
 	// Step 10: Complete
@@ -1545,12 +1560,17 @@ func (a *App) CancelProcess() error {
 	logger.Info("cancel process requested")
 	if a.cancelFunc != nil {
 		a.cancelFunc()
-		a.updateStatusError("ȡ")
+		a.updateStatusError("已取消")
 		logger.Info("process cancelled successfully")
 		return nil
 	}
 	logger.Warn("no process to cancel")
 	return types.NewAppError(types.ErrInternal, "ûڽеĴ", nil)
+}
+
+// GetPaperCategories returns all available paper categories for the frontend.
+func (a *App) GetPaperCategories() []types.PaperCategory {
+	return types.GetPaperCategories()
 }
 
 // GetSettings returns the current application settings for the frontend.
@@ -1559,17 +1579,18 @@ func (a *App) GetSettings() *types.Config {
 	logger.Debug("getting settings for frontend")
 	if a.config == nil {
 		return &types.Config{
-			OpenAIAPIKey:    "",
-			OpenAIBaseURL:   "https://api.openai.com/v1",
-			OpenAIModel:     "gpt-4",
-			ContextWindow:   8192,
-			DefaultCompiler: "pdflatex",
-			WorkDirectory:   "",
-			Concurrency:     3,
-			GitHubToken:     "",
-			GitHubOwner:     "",
-			GitHubRepo:      "",
-			LibraryPageSize: 20,
+			OpenAIAPIKey:       "",
+			OpenAIBaseURL:      "https://api.openai.com/v1",
+			OpenAIModel:        "gpt-4",
+			ContextWindow:      8192,
+			DefaultCompiler:    "pdflatex",
+			WorkDirectory:      "",
+			Concurrency:        3,
+			GitHubToken:        "",
+			GitHubOwner:        "",
+			GitHubRepo:         "",
+			LibraryPageSize:    20,
+			SharePromptEnabled: true,
 		}
 	}
 	cfg := a.config.GetConfig()
@@ -1613,17 +1634,18 @@ func (a *App) GetSettings() *types.Config {
 	logger.Debug("returning masked key", logger.String("maskedKey", maskedKey))
 
 	return &types.Config{
-		OpenAIAPIKey:    maskedKey,
-		OpenAIBaseURL:   cfg.OpenAIBaseURL,
-		OpenAIModel:     cfg.OpenAIModel,
-		ContextWindow:   cfg.ContextWindow,
-		DefaultCompiler: cfg.DefaultCompiler,
-		WorkDirectory:   cfg.WorkDirectory,
-		Concurrency:     cfg.Concurrency,
-		GitHubToken:     maskedGitHubToken,
-		GitHubOwner:     cfg.GitHubOwner,
-		GitHubRepo:      cfg.GitHubRepo,
-		LibraryPageSize: cfg.LibraryPageSize,
+		OpenAIAPIKey:       maskedKey,
+		OpenAIBaseURL:      cfg.OpenAIBaseURL,
+		OpenAIModel:        cfg.OpenAIModel,
+		ContextWindow:      cfg.ContextWindow,
+		DefaultCompiler:    cfg.DefaultCompiler,
+		WorkDirectory:      cfg.WorkDirectory,
+		Concurrency:        cfg.Concurrency,
+		GitHubToken:        maskedGitHubToken,
+		GitHubOwner:        cfg.GitHubOwner,
+		GitHubRepo:         cfg.GitHubRepo,
+		LibraryPageSize:    cfg.LibraryPageSize,
+		SharePromptEnabled: cfg.SharePromptEnabled,
 	}
 }
 
@@ -1670,12 +1692,13 @@ func (a *App) TestAPIConnection(apiKey, baseURL, model string) error {
 
 // SaveSettings saves the application settings from the frontend.
 // This method is exposed to the frontend via Wails bindings.
-func (a *App) SaveSettings(apiKey, baseURL, model string, contextWindow int, compiler, workDir string, concurrency int, githubToken, githubOwner, githubRepo string, libraryPageSize int) error {
+func (a *App) SaveSettings(apiKey, baseURL, model string, contextWindow int, compiler, workDir string, concurrency int, githubToken, githubOwner, githubRepo string, libraryPageSize int, sharePromptEnabled bool) error {
 	logger.Info("saving settings from frontend",
 		logger.String("baseURL", baseURL),
 		logger.String("model", model),
 		logger.Int("concurrency", concurrency),
 		logger.Int("libraryPageSize", libraryPageSize),
+		logger.Bool("sharePromptEnabled", sharePromptEnabled),
 	)
 
 	if a.config == nil {
@@ -1696,7 +1719,7 @@ func (a *App) SaveSettings(apiKey, baseURL, model string, contextWindow int, com
 	}
 
 	// Update config
-	if err := a.config.UpdateConfig(apiKey, baseURL, model, contextWindow, compiler, workDir, concurrency, libraryPageSize); err != nil {
+	if err := a.config.UpdateConfig(apiKey, baseURL, model, contextWindow, compiler, workDir, concurrency, libraryPageSize, sharePromptEnabled); err != nil {
 		logger.Error("failed to update config", err)
 		return err
 	}
@@ -3305,17 +3328,131 @@ func (a *App) CheckShareStatus() (*ShareCheckResult, error) {
 	}, nil
 }
 
+// CheckShareStatusWithCategory checks if files exist on GitHub for a specific arXiv ID
+// This checks ALL files for the arXiv ID (compatible with old filename formats)
+// categoryID is used to show the new filename format that will be used
+func (a *App) CheckShareStatusWithCategory(categoryID string) (*ShareCheckResult, error) {
+	logger.Debug("CheckShareStatusWithCategory called", logger.String("categoryID", categoryID))
+
+	// Check if we have a result to share
+	if a.lastResult == nil {
+		return &ShareCheckResult{
+			CanShare: false,
+			Message:  "没有可分享的翻译结果",
+		}, nil
+	}
+
+	// Get GitHub token from config
+	githubToken := ""
+	if a.config != nil {
+		cfg := a.config.GetConfig()
+		githubToken = cfg.GitHubToken
+	}
+	if githubToken == "" {
+		return &ShareCheckResult{
+			CanShare: false,
+			Message:  "请先在设置中配置 GitHub Token",
+		}, nil
+	}
+
+	// Use default owner and repo
+	owner := DefaultGitHubOwner
+	repo := DefaultGitHubRepo
+
+	// Extract arXiv ID
+	arxivID := ""
+	if a.lastResult.SourceID != "" {
+		arxivID = results.ExtractArxivID(a.lastResult.SourceID)
+		if arxivID == "" && strings.Contains(a.lastResult.SourceID, ".") && len(a.lastResult.SourceID) >= 9 {
+			arxivID = a.lastResult.SourceID
+		}
+	}
+	if arxivID == "" && a.lastResult.SourceInfo != nil {
+		arxivID = results.ExtractArxivID(a.lastResult.SourceInfo.OriginalRef)
+	}
+
+	if arxivID == "" {
+		return &ShareCheckResult{
+			CanShare: false,
+			Message:  "只能分享 arXiv 论文",
+		}, nil
+	}
+
+	// Create uploader
+	uploader := github.NewUploader(githubToken, owner, repo)
+
+	// List all existing files for this arXiv ID (compatible with old filenames)
+	existingFiles, err := uploader.ListFilesForArxivID(arxivID)
+	if err != nil {
+		logger.Warn("failed to list existing files", logger.Err(err))
+	}
+
+	// Check if Chinese and bilingual PDFs exist (any format)
+	chineseExists := false
+	bilingualExists := false
+	var existingChineseName, existingBilingualName string
+	for _, f := range existingFiles {
+		if f.Type == "chinese" {
+			chineseExists = true
+			existingChineseName = f.Name
+		} else if f.Type == "bilingual" {
+			bilingualExists = true
+			existingBilingualName = f.Name
+		}
+	}
+
+	// Build new file paths with category
+	safeID := strings.ReplaceAll(arxivID, "/", "_")
+	var chinesePath, bilingualPath string
+	if categoryID != "" {
+		chinesePath = fmt.Sprintf("%s_%s_cn.pdf", safeID, categoryID)
+		bilingualPath = fmt.Sprintf("%s_%s_bilingual.pdf", safeID, categoryID)
+	} else {
+		chinesePath = fmt.Sprintf("%s_cn.pdf", safeID)
+		bilingualPath = fmt.Sprintf("%s_bilingual.pdf", safeID)
+	}
+
+	// Build message about existing files
+	message := "可以分享"
+	if chineseExists || bilingualExists {
+		message = "已存在旧文件，上传后将被替换"
+		if existingChineseName != "" {
+			message += fmt.Sprintf(" (中文: %s)", existingChineseName)
+		}
+		if existingBilingualName != "" {
+			message += fmt.Sprintf(" (双语: %s)", existingBilingualName)
+		}
+	}
+
+	return &ShareCheckResult{
+		CanShare:           true,
+		ChinesePDFExists:   chineseExists,
+		BilingualPDFExists: bilingualExists,
+		ChinesePDFPath:     chinesePath,
+		BilingualPDFPath:   bilingualPath,
+		Message:            message,
+	}, nil
+}
+
 // ShareToGitHub uploads the translated PDFs to GitHub
+// categoryID: the category ID for the paper (e.g., "llm", "cv")
 // uploadChinese: whether to upload Chinese PDF (will overwrite if exists)
 // uploadBilingual: whether to upload bilingual PDF (will overwrite if exists)
-func (a *App) ShareToGitHub(uploadChinese, uploadBilingual bool) (*ShareResult, error) {
+// After uploading new files, old files for the same arXiv ID will be deleted
+func (a *App) ShareToGitHub(categoryID string, uploadChinese, uploadBilingual bool) (*ShareResult, error) {
 	logger.Info("ShareToGitHub called",
+		logger.String("categoryID", categoryID),
 		logger.Bool("uploadChinese", uploadChinese),
 		logger.Bool("uploadBilingual", uploadBilingual))
 
 	// Check if we have a result to share
 	if a.lastResult == nil {
 		return nil, types.NewAppError(types.ErrInvalidInput, "没有可分享的翻译结果", nil)
+	}
+
+	// Validate category ID
+	if categoryID == "" {
+		return nil, types.NewAppError(types.ErrInvalidInput, "请选择论文类别", nil)
 	}
 
 	// Get GitHub token from config
@@ -3358,10 +3495,22 @@ func (a *App) ShareToGitHub(uploadChinese, uploadBilingual bool) (*ShareResult, 
 	result := &ShareResult{Success: true}
 	var uploadedCount int
 
+	// List existing files for this arXiv ID before uploading
+	existingFiles, err := uploader.ListFilesForArxivID(arxivID)
+	if err != nil {
+		logger.Warn("failed to list existing files", logger.Err(err))
+		existingFiles = nil
+	}
+
+	// Track new file names to avoid deleting them
+	newFileNames := make(map[string]bool)
+
 	// Upload Chinese PDF if requested
+	// File name format: arxivid_categoryid_cn.pdf
 	if uploadChinese && a.lastResult.TranslatedPDFPath != "" {
-		chinesePath := fmt.Sprintf("%s_cn.pdf", safeID)
-		commitMsg := fmt.Sprintf("Add Chinese translation for %s", arxivID)
+		chinesePath := fmt.Sprintf("%s_%s_cn.pdf", safeID, categoryID)
+		newFileNames[chinesePath] = true
+		commitMsg := fmt.Sprintf("Add Chinese translation for %s [%s]", arxivID, categoryID)
 
 		// Always overwrite if user chose to upload (they've been warned about existing files)
 		uploadResult, err := uploader.UploadFile(a.lastResult.TranslatedPDFPath, chinesePath, commitMsg, true)
@@ -3377,9 +3526,11 @@ func (a *App) ShareToGitHub(uploadChinese, uploadBilingual bool) (*ShareResult, 
 	}
 
 	// Upload bilingual PDF if requested
+	// File name format: arxivid_categoryid_bilingual.pdf
 	if uploadBilingual && a.lastResult.OriginalPDFPath != "" && a.lastResult.TranslatedPDFPath != "" {
-		bilingualPath := fmt.Sprintf("%s_bilingual.pdf", safeID)
-		commitMsg := fmt.Sprintf("Add bilingual PDF for %s", arxivID)
+		bilingualPath := fmt.Sprintf("%s_%s_bilingual.pdf", safeID, categoryID)
+		newFileNames[bilingualPath] = true
+		commitMsg := fmt.Sprintf("Add bilingual PDF for %s [%s]", arxivID, categoryID)
 
 		// Check if bilingual PDF already exists (generated during translation)
 		bilingualLocalPath := a.lastResult.BilingualPDFPath
@@ -3415,6 +3566,34 @@ func (a *App) ShareToGitHub(uploadChinese, uploadBilingual bool) (*ShareResult, 
 			} else if uploadResult.Success {
 				result.BilingualPDFURL = uploadResult.URL
 				uploadedCount++
+			}
+		}
+	}
+
+	// Delete old files that are not the new files (clean up old format files)
+	if uploadedCount > 0 && existingFiles != nil {
+		for _, oldFile := range existingFiles {
+			// Skip if this is one of the new files we just uploaded
+			if newFileNames[oldFile.Name] {
+				continue
+			}
+
+			// Delete old Chinese PDF if we uploaded a new one
+			if uploadChinese && oldFile.Type == "chinese" {
+				logger.Info("deleting old Chinese PDF", logger.String("file", oldFile.Name))
+				commitMsg := fmt.Sprintf("Remove old Chinese PDF %s (replaced by new format)", oldFile.Name)
+				if err := uploader.DeleteFile(oldFile.Path, oldFile.SHA, commitMsg); err != nil {
+					logger.Warn("failed to delete old Chinese PDF", logger.String("file", oldFile.Name), logger.Err(err))
+				}
+			}
+
+			// Delete old bilingual PDF if we uploaded a new one
+			if uploadBilingual && oldFile.Type == "bilingual" {
+				logger.Info("deleting old bilingual PDF", logger.String("file", oldFile.Name))
+				commitMsg := fmt.Sprintf("Remove old bilingual PDF %s (replaced by new format)", oldFile.Name)
+				if err := uploader.DeleteFile(oldFile.Path, oldFile.SHA, commitMsg); err != nil {
+					logger.Warn("failed to delete old bilingual PDF", logger.String("file", oldFile.Name), logger.Err(err))
+				}
 			}
 		}
 	}
@@ -3516,16 +3695,23 @@ func (a *App) CheckShareStatusForPaper(arxivID string) (*ShareCheckResult, error
 
 // SharePaperToGitHub uploads a specific paper's PDFs to GitHub
 // arxivID: the arXiv ID of the paper to share
+// categoryID: the category ID for the paper (e.g., "llm", "cv")
 // uploadChinese: whether to upload Chinese PDF (will overwrite if exists)
 // uploadBilingual: whether to upload bilingual PDF (will overwrite if exists)
-func (a *App) SharePaperToGitHub(arxivID string, uploadChinese, uploadBilingual bool) (*ShareResult, error) {
+func (a *App) SharePaperToGitHub(arxivID string, categoryID string, uploadChinese, uploadBilingual bool) (*ShareResult, error) {
 	logger.Info("SharePaperToGitHub called",
 		logger.String("arxivID", arxivID),
+		logger.String("categoryID", categoryID),
 		logger.Bool("uploadChinese", uploadChinese),
 		logger.Bool("uploadBilingual", uploadBilingual))
 
 	if a.results == nil {
 		return nil, types.NewAppError(types.ErrInternal, "结果管理器未初始化", nil)
+	}
+
+	// Validate category ID
+	if categoryID == "" {
+		return nil, types.NewAppError(types.ErrInvalidInput, "请选择论文类别", nil)
 	}
 
 	// Get paper info
@@ -3561,9 +3747,10 @@ func (a *App) SharePaperToGitHub(arxivID string, uploadChinese, uploadBilingual 
 	var uploadedCount int
 
 	// Upload Chinese PDF if requested
+	// File name format: arxivid_categoryid_cn.pdf
 	if uploadChinese && paper.TranslatedPDF != "" {
-		chinesePath := fmt.Sprintf("%s_cn.pdf", safeID)
-		commitMsg := fmt.Sprintf("Add Chinese translation for %s", arxivID)
+		chinesePath := fmt.Sprintf("%s_%s_cn.pdf", safeID, categoryID)
+		commitMsg := fmt.Sprintf("Add Chinese translation for %s [%s]", arxivID, categoryID)
 
 		uploadResult, err := uploader.UploadFile(paper.TranslatedPDF, chinesePath, commitMsg, true)
 		if err != nil {
@@ -3578,9 +3765,10 @@ func (a *App) SharePaperToGitHub(arxivID string, uploadChinese, uploadBilingual 
 	}
 
 	// Generate and upload bilingual PDF if requested
+	// File name format: arxivid_categoryid_bilingual.pdf
 	if uploadBilingual && paper.OriginalPDF != "" && paper.TranslatedPDF != "" {
-		bilingualPath := fmt.Sprintf("%s_bilingual.pdf", safeID)
-		commitMsg := fmt.Sprintf("Add bilingual PDF for %s", arxivID)
+		bilingualPath := fmt.Sprintf("%s_%s_bilingual.pdf", safeID, categoryID)
+		commitMsg := fmt.Sprintf("Add bilingual PDF for %s [%s]", arxivID, categoryID)
 
 		// Check if bilingual PDF already exists
 		bilingualLocalPath := paper.BilingualPDF
@@ -3683,6 +3871,7 @@ func (a *App) SearchGitHubTranslation(arxivID string) (*github.TranslationSearch
 	// Get GitHub repository settings from config (same as SharePaperToGitHub)
 	owner := DefaultGitHubOwner
 	repo := DefaultGitHubRepo
+	githubToken := ""
 
 	if a.config != nil {
 		cfg := a.config.GetConfig()
@@ -3692,14 +3881,16 @@ func (a *App) SearchGitHubTranslation(arxivID string) (*github.TranslationSearch
 		if cfg.GitHubRepo != "" {
 			repo = cfg.GitHubRepo
 		}
+		githubToken = cfg.GitHubToken
 	}
 
 	logger.Info("using GitHub repository",
 		logger.String("owner", owner),
-		logger.String("repo", repo))
+		logger.String("repo", repo),
+		logger.Bool("hasToken", githubToken != ""))
 
-	// Create uploader (no token needed for public searches)
-	uploader := github.NewUploader("", owner, repo)
+	// Create uploader with token for authenticated requests (higher rate limit)
+	uploader := github.NewUploader(githubToken, owner, repo)
 
 	// Search for translation
 	result, err := uploader.SearchTranslation(arxivID)
@@ -3732,8 +3923,15 @@ func (a *App) DownloadGitHubTranslation(arxivID, fileType, saveDir string) (stri
 	arxivID = strings.TrimPrefix(strings.ToLower(arxivID), "arxiv:")
 	arxivID = strings.TrimSpace(arxivID)
 
+	// Get GitHub token for authenticated requests
+	githubToken := ""
+	if a.config != nil {
+		cfg := a.config.GetConfig()
+		githubToken = cfg.GitHubToken
+	}
+
 	// Search for the translation first
-	uploader := github.NewUploader("", DefaultGitHubOwner, DefaultGitHubRepo)
+	uploader := github.NewUploader(githubToken, DefaultGitHubOwner, DefaultGitHubRepo)
 	searchResult, err := uploader.SearchTranslation(arxivID)
 	if err != nil {
 		return "", types.NewAppError(types.ErrAPICall, "搜索失败: "+err.Error(), err)
@@ -3810,6 +4008,7 @@ func (a *App) ListRecentGitHubTranslations(maxCount int) ([]github.ArxivPaperInf
 	// Get GitHub repository settings from config
 	owner := DefaultGitHubOwner
 	repo := DefaultGitHubRepo
+	githubToken := ""
 
 	if a.config != nil {
 		cfg := a.config.GetConfig()
@@ -3819,14 +4018,16 @@ func (a *App) ListRecentGitHubTranslations(maxCount int) ([]github.ArxivPaperInf
 		if cfg.GitHubRepo != "" {
 			repo = cfg.GitHubRepo
 		}
+		githubToken = cfg.GitHubToken
 	}
 
 	logger.Info("using GitHub repository",
 		logger.String("owner", owner),
-		logger.String("repo", repo))
+		logger.String("repo", repo),
+		logger.Bool("hasToken", githubToken != ""))
 
-	// Create uploader (no token needed for public searches)
-	uploader := github.NewUploader("", owner, repo)
+	// Create uploader with token for authenticated requests (higher rate limit)
+	uploader := github.NewUploader(githubToken, owner, repo)
 
 	// List recent translations
 	papers, err := uploader.ListRecentTranslations(maxCount)
@@ -3837,6 +4038,108 @@ func (a *App) ListRecentGitHubTranslations(maxCount int) ([]github.ArxivPaperInf
 
 	logger.Info("listed GitHub translations", logger.Int("count", len(papers)))
 	return papers, nil
+}
+
+// ListGitHubTranslationsByCategories lists translations filtered by category IDs
+// categories: list of category IDs to filter by (e.g., ["llm", "cv", "nlp"])
+// maxCount: maximum number of papers to return
+// Returns papers whose filenames contain any of the specified category IDs
+func (a *App) ListGitHubTranslationsByCategories(categories []string, maxCount int) ([]github.ArxivPaperInfo, error) {
+	logger.Info("listing GitHub translations by categories",
+		logger.Int("categoryCount", len(categories)),
+		logger.Int("maxCount", maxCount))
+
+	// Get GitHub repository settings from config
+	owner := DefaultGitHubOwner
+	repo := DefaultGitHubRepo
+	githubToken := ""
+
+	if a.config != nil {
+		cfg := a.config.GetConfig()
+		if cfg.GitHubOwner != "" {
+			owner = cfg.GitHubOwner
+		}
+		if cfg.GitHubRepo != "" {
+			repo = cfg.GitHubRepo
+		}
+		githubToken = cfg.GitHubToken
+	}
+
+	// Create uploader with token for authenticated requests
+	uploader := github.NewUploader(githubToken, owner, repo)
+
+	// List all translations first
+	allPapers, err := uploader.ListRecentTranslations(maxCount * 10) // Get more to filter
+	if err != nil {
+		logger.Error("failed to list GitHub translations", err)
+		return nil, types.NewAppError(types.ErrAPICall, "获取列表失败: "+err.Error(), err)
+	}
+
+	// Filter by categories
+	// Filename format: arxivid_categoryid_cn.pdf or arxivid_categoryid_bilingual.pdf
+	filteredPapers := make([]github.ArxivPaperInfo, 0)
+	categorySet := make(map[string]bool)
+	for _, cat := range categories {
+		categorySet[strings.ToLower(cat)] = true
+	}
+
+	for _, paper := range allPapers {
+		// Extract category from Chinese PDF filename
+		catID := extractCategoryFromFilename(paper.ChinesePDF)
+		if catID == "" {
+			// Try bilingual PDF
+			catID = extractCategoryFromFilename(paper.BilingualPDF)
+		}
+
+		if catID != "" && categorySet[strings.ToLower(catID)] {
+			filteredPapers = append(filteredPapers, paper)
+		}
+	}
+
+	// Limit to maxCount
+	if len(filteredPapers) > maxCount {
+		filteredPapers = filteredPapers[:maxCount]
+	}
+
+	logger.Info("filtered GitHub translations by categories",
+		logger.Int("totalCount", len(allPapers)),
+		logger.Int("filteredCount", len(filteredPapers)))
+
+	return filteredPapers, nil
+}
+
+// extractCategoryFromFilename extracts category ID from filename
+// Format: arxivid_categoryid_cn.pdf or arxivid_categoryid_bilingual.pdf
+func extractCategoryFromFilename(filename string) string {
+	if filename == "" {
+		return ""
+	}
+
+	// Match pattern: something_categoryid_cn.pdf or something_categoryid_bilingual.pdf
+	// The category ID is between the last underscore before _cn or _bilingual
+	filename = strings.ToLower(filename)
+
+	var suffix string
+	if strings.HasSuffix(filename, "_cn.pdf") {
+		suffix = "_cn.pdf"
+	} else if strings.HasSuffix(filename, "_bilingual.pdf") {
+		suffix = "_bilingual.pdf"
+	} else {
+		return ""
+	}
+
+	// Remove suffix
+	nameWithoutSuffix := strings.TrimSuffix(filename, suffix)
+
+	// Find the last underscore
+	lastUnderscore := strings.LastIndex(nameWithoutSuffix, "_")
+	if lastUnderscore == -1 {
+		return ""
+	}
+
+	// Extract category ID
+	catID := nameWithoutSuffix[lastUnderscore+1:]
+	return catID
 }
 
 // GetArxivPaperMetadata fetches paper metadata from arXiv API
@@ -4293,6 +4596,128 @@ func (a *App) ExportErrorIDsToFile() (string, error) {
 	return savePath, nil
 }
 
+// ReportErrorsToGitHub 上报错误列表到 GitHub Issue
+// 将所有未上报的错误的 arXiv ID 和错误信息汇总到一个 Issue 中
+func (a *App) ReportErrorsToGitHub() (*github.IssueCreateResult, error) {
+	if a.errorMgr == nil {
+		return nil, fmt.Errorf("error manager not initialized")
+	}
+
+	// 只获取未上报的错误
+	errorList := a.errorMgr.ListUnreportedErrors()
+	if len(errorList) == 0 {
+		return nil, fmt.Errorf("no unreported errors to report")
+	}
+
+	// 获取 GitHub 配置
+	token := ""
+	owner := DefaultGitHubOwner
+	repo := DefaultGitHubRepo
+
+	if a.config != nil {
+		cfg := a.config.GetConfig()
+		token = cfg.GitHubToken
+	}
+
+	if token == "" {
+		return nil, fmt.Errorf("GitHub token not configured, please set it in settings")
+	}
+
+	// 创建 GitHub uploader
+	uploader := github.NewUploader(token, owner, repo)
+
+	// 验证 token
+	if err := uploader.ValidateToken(); err != nil {
+		return nil, fmt.Errorf("GitHub token validation failed: %w", err)
+	}
+
+	// 构建 Issue 标题
+	// 构建标题，包含 arXiv ID（最多5个）
+	var titleBuilder strings.Builder
+	titleBuilder.WriteString("翻译错误报告")
+	
+	// 添加 arXiv ID 到标题
+	if len(errorList) > 0 {
+		titleBuilder.WriteString(" - ")
+		maxIDsInTitle := 5
+		for i, record := range errorList {
+			if i >= maxIDsInTitle {
+				titleBuilder.WriteString("等")
+				break
+			}
+			if i > 0 {
+				titleBuilder.WriteString(", ")
+			}
+			titleBuilder.WriteString(record.ID)
+		}
+	}
+	
+	titleBuilder.WriteString(fmt.Sprintf(" (%d个, %s)", len(errorList), time.Now().Format("2006-01-02")))
+	title := titleBuilder.String()
+
+	// 构建 Issue 内容
+	var bodyBuilder strings.Builder
+	bodyBuilder.WriteString("## 翻译错误报告\n\n")
+	bodyBuilder.WriteString(fmt.Sprintf("报告时间: %s\n\n", time.Now().Format("2006-01-02 15:04:05")))
+	bodyBuilder.WriteString(fmt.Sprintf("错误数量: %d\n\n", len(errorList)))
+	
+	// arXiv ID 列表（方便复制）
+	bodyBuilder.WriteString("### arXiv ID 列表\n\n")
+	bodyBuilder.WriteString("```\n")
+	reportedIDs := make([]string, 0, len(errorList))
+	for _, record := range errorList {
+		bodyBuilder.WriteString(record.ID + "\n")
+		reportedIDs = append(reportedIDs, record.ID)
+	}
+	bodyBuilder.WriteString("```\n\n")
+
+	// 详细错误信息
+	bodyBuilder.WriteString("### 详细错误信息\n\n")
+	bodyBuilder.WriteString("| arXiv ID | 标题 | 阶段 | 错误信息 | 重试次数 |\n")
+	bodyBuilder.WriteString("|----------|------|------|----------|----------|\n")
+	
+	for _, record := range errorList {
+		// 截断过长的错误信息
+		errorMsg := record.ErrorMsg
+		if len(errorMsg) > 100 {
+			errorMsg = errorMsg[:100] + "..."
+		}
+		// 转义 Markdown 表格中的特殊字符
+		errorMsg = strings.ReplaceAll(errorMsg, "|", "\\|")
+		errorMsg = strings.ReplaceAll(errorMsg, "\n", " ")
+		
+		recordTitle := record.Title
+		if len(recordTitle) > 50 {
+			recordTitle = recordTitle[:50] + "..."
+		}
+		recordTitle = strings.ReplaceAll(recordTitle, "|", "\\|")
+		
+		stageName := errors.GetStageDisplayName(record.Stage)
+		
+		bodyBuilder.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %d |\n",
+			record.ID, recordTitle, stageName, errorMsg, record.RetryCount))
+	}
+
+	// 创建 Issue
+	result, err := uploader.CreateIssue(title, bodyBuilder.String(), []string{"bug", "translation-error"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GitHub issue: %w", err)
+	}
+
+	// 上报成功后，标记这些错误为已上报
+	if err := a.errorMgr.MarkAsReported(reportedIDs); err != nil {
+		logger.Warn("failed to mark errors as reported", logger.Err(err))
+		// 不返回错误，因为 Issue 已经创建成功
+	}
+
+	logger.Info("errors reported to GitHub issue",
+		logger.String("issueURL", result.IssueURL),
+		logger.Int("issueNumber", result.IssueNum),
+		logger.Int("errorCount", len(errorList)))
+
+	return result, nil
+}
+
 // recordError 内部方法：记录错误到错误管理器
 func (a *App) recordError(id, title, input string, stage errors.ErrorStage, errorMsg string) {
 	if a.errorMgr == nil {
@@ -4307,4 +4732,20 @@ func (a *App) recordError(id, title, input string, stage errors.ErrorStage, erro
 			logger.String("id", id),
 			logger.String("stage", string(stage)))
 	}
+}
+
+// checkPageCountDifference 检查翻译前后的页数差异
+// 如果翻译后页数比原始页数少超过15%，返回可疑结果
+func (a *App) checkPageCountDifference(originalPDFPath, translatedPDFPath string) *pdf.PageCountResult {
+	translator := pdf.NewBabelDocTranslator(pdf.BabelDocConfig{
+		WorkDir: a.workDir,
+	})
+
+	result, err := translator.CheckPageCountDifference(originalPDFPath, translatedPDFPath)
+	if err != nil {
+		logger.Warn("failed to check page count difference", logger.Err(err))
+		return nil
+	}
+
+	return result
 }

@@ -61,14 +61,15 @@ func NewConfigManager(configPath string) (*ConfigManager, error) {
 // defaultConfig returns a Config with default values
 func defaultConfig() *types.Config {
 	return &types.Config{
-		OpenAIAPIKey:    "",
-		OpenAIBaseURL:   DefaultBaseURL,
-		OpenAIModel:     DefaultModel,
-		ContextWindow:   DefaultContextWindow,
-		DefaultCompiler: DefaultCompiler,
-		WorkDirectory:   "",
-		Concurrency:     DefaultConcurrency,
-		LibraryPageSize: DefaultLibraryPageSize,
+		OpenAIAPIKey:       "",
+		OpenAIBaseURL:      DefaultBaseURL,
+		OpenAIModel:        DefaultModel,
+		ContextWindow:      DefaultContextWindow,
+		DefaultCompiler:    DefaultCompiler,
+		WorkDirectory:      "",
+		Concurrency:        DefaultConcurrency,
+		LibraryPageSize:    DefaultLibraryPageSize,
+		SharePromptEnabled: true, // 默认开启分享提示
 	}
 }
 
@@ -236,7 +237,7 @@ func (m *ConfigManager) GetBaseURL() string {
 }
 
 // UpdateConfig updates the configuration with new values and saves it.
-func (m *ConfigManager) UpdateConfig(apiKey, baseURL, model string, contextWindow int, compiler, workDir string, concurrency int, libraryPageSize int) error {
+func (m *ConfigManager) UpdateConfig(apiKey, baseURL, model string, contextWindow int, compiler, workDir string, concurrency int, libraryPageSize int, sharePromptEnabled bool) error {
 	logger.Info("updating configuration")
 	if m.config == nil {
 		m.config = defaultConfig()
@@ -267,6 +268,8 @@ func (m *ConfigManager) UpdateConfig(apiKey, baseURL, model string, contextWindo
 	if libraryPageSize > 0 {
 		m.config.LibraryPageSize = libraryPageSize
 	}
+	// SharePromptEnabled is a bool, always update it
+	m.config.SharePromptEnabled = sharePromptEnabled
 
 	return m.Save()
 }

@@ -22,6 +22,8 @@ export function CheckShareStatus():Promise<main.ShareCheckResult>;
 
 export function CheckShareStatusForPaper(arg1:string):Promise<main.ShareCheckResult>;
 
+export function CheckShareStatusWithCategory(arg1:string):Promise<main.ShareCheckResult>;
+
 export function CheckStartupRequirements():Promise<main.StartupCheckResult>;
 
 export function ClearAllErrors():Promise<void>;
@@ -64,6 +66,8 @@ export function GetPDFDataURL(arg1:string):Promise<string>;
 
 export function GetPDFStatus():Promise<pdf.PDFStatus>;
 
+export function GetPaperCategories():Promise<Array<types.PaperCategory>>;
+
 export function GetResultsDirectory():Promise<string>;
 
 export function GetSettings():Promise<types.Config>;
@@ -81,6 +85,8 @@ export function GetWorkDir():Promise<string>;
 export function IsProcessing():Promise<boolean>;
 
 export function ListErrors():Promise<Array<errors.ErrorRecord>>;
+
+export function ListGitHubTranslationsByCategories(arg1:Array<string>,arg2:number):Promise<Array<github.ArxivPaperInfo>>;
 
 export function ListRecentGitHubTranslations(arg1:number):Promise<Array<github.ArxivPaperInfo>>;
 
@@ -106,13 +112,15 @@ export function ProcessSourceWithForce(arg1:string,arg2:boolean):Promise<types.P
 
 export function ReloadConfig():Promise<void>;
 
+export function ReportErrorsToGitHub():Promise<github.IssueCreateResult>;
+
 export function RetranslateFromArxiv(arg1:string):Promise<types.ProcessResult>;
 
 export function RetryFromError(arg1:string):Promise<types.ProcessResult>;
 
 export function SaveLastInput(arg1:string):Promise<void>;
 
-export function SaveSettings(arg1:string,arg2:string,arg3:string,arg4:number,arg5:string,arg6:string,arg7:number,arg8:string,arg9:string,arg10:string,arg11:number):Promise<void>;
+export function SaveSettings(arg1:string,arg2:string,arg3:string,arg4:number,arg5:string,arg6:string,arg7:number,arg8:string,arg9:string,arg10:string,arg11:number,arg12:boolean):Promise<void>;
 
 export function SearchGitHubTranslation(arg1:string):Promise<github.TranslationSearchResult>;
 
@@ -122,9 +130,9 @@ export function SetWailsRuntime(arg1:boolean):Promise<void>;
 
 export function SetWorkDir(arg1:string):Promise<void>;
 
-export function SharePaperToGitHub(arg1:string,arg2:boolean,arg3:boolean):Promise<main.ShareResult>;
+export function SharePaperToGitHub(arg1:string,arg2:string,arg3:boolean,arg4:boolean):Promise<main.ShareResult>;
 
-export function ShareToGitHub(arg1:boolean,arg2:boolean):Promise<main.ShareResult>;
+export function ShareToGitHub(arg1:string,arg2:boolean,arg3:boolean):Promise<main.ShareResult>;
 
 export function TestAPIConnection(arg1:string,arg2:string,arg3:string):Promise<void>;
 
