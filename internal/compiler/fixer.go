@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"latex-translator/internal/logger"
+	"latex-translator/internal/translator"
 	"latex-translator/internal/types"
 )
 
@@ -538,8 +539,7 @@ If you cannot fix the error, return:
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPromptBuilder.String()},
 		},
-		"temperature": 0.1, // Lower temperature for more consistent fixes
-		"max_tokens":  32768, // More tokens for comprehensive fixes
+		"max_tokens": 8192, // More tokens for comprehensive fixes
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -805,8 +805,7 @@ If you cannot fix the error, return:
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPromptBuilder.String()},
 		},
-		"temperature": 0.2,
-		"max_tokens":  16384,
+		"max_tokens": 8192,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -1081,8 +1080,15 @@ func QuickFix(content string) (string, bool) {
 	openBraces := strings.Count(result, "{") - strings.Count(result, "\\{")
 	closeBraces := strings.Count(result, "}") - strings.Count(result, "\\}")
 	if openBraces > closeBraces {
-		for i := 0; i < openBraces-closeBraces; i++ {
-			result += "}"
+		// Add missing closing braces BEFORE \end{document} if it exists
+		missingBraces := strings.Repeat("}", openBraces-closeBraces)
+		endDocIdx := strings.LastIndex(result, "\\end{document}")
+		if endDocIdx != -1 {
+			// Insert before \end{document}
+			result = result[:endDocIdx] + missingBraces + "\n" + result[endDocIdx:]
+		} else {
+			// No \end{document}, append at end
+			result += missingBraces
 		}
 		anyFixed = true
 		logger.Debug("rule-based fix: added missing closing braces",
@@ -1159,6 +1165,20 @@ func QuickFix(content string) (string, bool) {
 		anyFixed = true
 	}
 
+	// Rule 14b: Fix subfigure/subcaption package conflict
+	// These two packages are incompatible - remove subfigure if subcaption is present
+	result, subfigureFixed := fixSubfigureConflict(result)
+	if subfigureFixed {
+		anyFixed = true
+	}
+
+	// Rule 14c: Fix missing closing braces in \newenvironment definitions
+	// This is a common LLM translation artifact
+	result, newenvFixed := fixNewenvironmentBraces(result)
+	if newenvFixed {
+		anyFixed = true
+	}
+
 	// Rule 15: Fix trailing garbage braces at end of file
 	// This is a common LLM translation artifact where extra braces appear at the very end
 	// Pattern: content followed by }}}}} at the end of file
@@ -1169,11 +1189,20 @@ func QuickFix(content string) (string, bool) {
 
 	// Rule 16: Fix \end{document}} with extra braces
 	// Pattern: \end{document}}} should be \end{document}
-	endDocExtraBracesPattern := regexp.MustCompile(`(\\end\{document\})(\}+)\s*$`)
+	// Also handles case where } is on a new line after \end{document}
+	endDocExtraBracesPattern := regexp.MustCompile(`(\\end\{document\})\s*(\}+)\s*$`)
 	if endDocExtraBracesPattern.MatchString(result) {
 		result = endDocExtraBracesPattern.ReplaceAllString(result, "$1\n")
 		anyFixed = true
 		logger.Debug("rule-based fix: removed extra braces after \\end{document}")
+	}
+
+	// Rule 16b: Fix nested/duplicate \resizebox commands
+	// Pattern: \resizebox{\textwidth}{!}{\resizebox{\textwidth}{!}{...
+	// This is a common LLM translation artifact where resizebox is duplicated
+	result, nestedResizeboxFixed := fixNestedResizebox(result)
+	if nestedResizeboxFixed {
+		anyFixed = true
 	}
 
 	// Rule 17: Fix missing closing brace for \resizebox in tables
@@ -1224,7 +1253,144 @@ func QuickFix(content string) (string, bool) {
 		anyFixed = true
 	}
 
+	// Rule 23: Fix table layout issues (overflow, overlap)
+	// This includes reducing column spacing, applying smart scaling, and improving float placement
+	result, tableLayoutFixed := FixTableLayout(result)
+	if tableLayoutFixed {
+		anyFixed = true
+	}
+
+	// Rule 24: Fix figure layout issues (overflow, overlap)
+	// This includes fixing environment mismatches and adjusting widths
+	result, figureLayoutFixed := FixFigureLayout(result)
+	if figureLayoutFixed {
+		anyFixed = true
+	}
+
+	// Rule 25: Convert extremely wide tables (14+ columns) to table*
+	// This prevents overlap with surrounding text
+	result, wideTableFixed := ConvertWideTableToTableStar(result)
+	if wideTableFixed {
+		anyFixed = true
+	}
+
+	// Rule 26: Fix unbalanced braces at end of file
+	// This is a common issue when LLM translation truncates content
+	// We add missing closing braces before the last \end{...} or at the end
+	result, unbalancedFixed := fixUnbalancedBracesAtEnd(result)
+	if unbalancedFixed {
+		anyFixed = true
+	}
+
 	return result, anyFixed
+}
+
+// fixUnbalancedBracesAtEnd fixes unbalanced braces by adding missing closing braces at the end.
+// This is a common issue when LLM translation truncates content or loses braces.
+// The function counts open and close braces (excluding escaped ones) and adds missing } at the end.
+func fixUnbalancedBracesAtEnd(content string) (string, bool) {
+	// Count braces (excluding escaped ones like \{ and \})
+	openBraces := 0
+	closeBraces := 0
+	
+	for i := 0; i < len(content); i++ {
+		if content[i] == '{' && (i == 0 || content[i-1] != '\\') {
+			openBraces++
+		}
+		if content[i] == '}' && (i == 0 || content[i-1] != '\\') {
+			closeBraces++
+		}
+	}
+	
+	diff := openBraces - closeBraces
+	
+	if diff <= 0 {
+		// No missing closing braces (or more closing than opening, handled elsewhere)
+		return content, false
+	}
+	
+	// Only fix if the difference is reasonable (< 20 missing braces)
+	// Larger differences likely indicate a more serious structural problem
+	if diff > 20 {
+		logger.Warn("too many missing closing braces, skipping auto-fix",
+			logger.Int("openBraces", openBraces),
+			logger.Int("closeBraces", closeBraces),
+			logger.Int("diff", diff))
+		return content, false
+	}
+	
+	// Find the best position to insert missing braces
+	// Priority: before \end{document}, before last \end{table/figure}, or at end
+	result := content
+	missingBraces := strings.Repeat("}", diff)
+	
+	// Try to find \end{document}
+	endDocIdx := strings.LastIndex(result, "\\end{document}")
+	if endDocIdx != -1 {
+		// Insert before \end{document}
+		result = result[:endDocIdx] + missingBraces + "\n" + result[endDocIdx:]
+		logger.Debug("rule-based fix: added missing closing braces before \\end{document}",
+			logger.Int("count", diff))
+		return result, true
+	}
+	
+	// Try to find last \end{table} or \end{figure} or \end{table*} or \end{figure*}
+	lastEndEnvIdx := -1
+	for _, env := range []string{"\\end{table*}", "\\end{figure*}", "\\end{table}", "\\end{figure}"} {
+		idx := strings.LastIndex(result, env)
+		if idx > lastEndEnvIdx {
+			lastEndEnvIdx = idx + len(env)
+		}
+	}
+	
+	if lastEndEnvIdx > 0 {
+		// Insert after the last table/figure environment
+		result = result[:lastEndEnvIdx] + "\n" + missingBraces + result[lastEndEnvIdx:]
+		logger.Debug("rule-based fix: added missing closing braces after last table/figure",
+			logger.Int("count", diff))
+		return result, true
+	}
+	
+	// Fallback: append at the end
+	result = result + "\n" + missingBraces
+	logger.Debug("rule-based fix: added missing closing braces at end of file",
+		logger.Int("count", diff))
+	return result, true
+}
+
+// fixNestedResizebox removes duplicate/nested \resizebox commands.
+// This is a common LLM translation artifact where \resizebox is duplicated multiple times.
+// Pattern: \resizebox{\textwidth}{!}{\resizebox{\textwidth}{!}{... -> \resizebox{\textwidth}{!}{...
+func fixNestedResizebox(content string) (string, bool) {
+	// Pattern to match nested resizebox: \resizebox{...}{...}{\resizebox{...}{...}{
+	// We want to keep only the outermost one
+	nestedPattern := regexp.MustCompile(`(\\resizebox\s*\{[^}]+\}\s*\{[^}]+\}\s*\{%?\s*\n?\s*)(\\resizebox\s*\{[^}]+\}\s*\{[^}]+\}\s*\{%?\s*\n?\s*)+`)
+	
+	if !nestedPattern.MatchString(content) {
+		return content, false
+	}
+	
+	// Replace nested resizebox with single resizebox
+	result := nestedPattern.ReplaceAllStringFunc(content, func(match string) string {
+		// Count how many nested resizebox we have
+		count := strings.Count(match, "\\resizebox")
+		if count <= 1 {
+			return match
+		}
+		
+		// Keep only the first \resizebox{...}{...}{
+		firstResizebox := regexp.MustCompile(`^\\resizebox\s*\{[^}]+\}\s*\{[^}]+\}\s*\{%?\s*\n?\s*`)
+		firstMatch := firstResizebox.FindString(match)
+		if firstMatch == "" {
+			return match
+		}
+		
+		logger.Debug("rule-based fix: removed nested resizebox",
+			logger.Int("nestedCount", count-1))
+		return firstMatch
+	})
+	
+	return result, result != content
 }
 
 // fixTrailingGarbageBraces removes trailing garbage braces at the end of a file.
@@ -1353,6 +1519,87 @@ func fixBreakurlCompatibility(content string) (string, bool) {
 	result := beginDocPattern.ReplaceAllString(content, fix+`$1`)
 	logger.Debug("rule-based fix: added breakurl compatibility fix for xelatex")
 	return result, true
+}
+
+// fixSubfigureConflict fixes the conflict between subfigure and subcaption packages
+// These packages are incompatible and cause "Command \c@subfigure already defined" errors
+// When both are present, we remove subfigure and keep subcaption (the newer package)
+func fixSubfigureConflict(content string) (string, bool) {
+	// Check if both packages are present
+	hasSubfigure := strings.Contains(content, `\usepackage{subfigure}`) ||
+		strings.Contains(content, `\usepackage[`) && strings.Contains(content, `]{subfigure}`)
+	hasSubcaption := strings.Contains(content, `\usepackage{subcaption}`) ||
+		strings.Contains(content, `\usepackage[`) && strings.Contains(content, `]{subcaption}`)
+
+	if !hasSubfigure || !hasSubcaption {
+		return content, false
+	}
+
+	// Remove subfigure package (keep subcaption as it's the newer, more compatible package)
+	// Match \usepackage{subfigure} or \usepackage[options]{subfigure}
+	subfigurePattern := regexp.MustCompile(`\\usepackage(\[[^\]]*\])?\{subfigure\}\s*\n?`)
+	result := subfigurePattern.ReplaceAllString(content, "")
+
+	logger.Debug("rule-based fix: removed subfigure package (conflicts with subcaption)")
+	return result, true
+}
+
+// fixNewenvironmentBraces fixes missing closing braces in \newenvironment definitions
+// This is a common issue when LLM translation breaks the environment definition structure
+// Pattern: \newenvironment{name}[args]{begin}{end} where {end} is missing the closing brace
+func fixNewenvironmentBraces(content string) (string, bool) {
+	// Pattern to find \newenvironment definitions
+	// Look for patterns like:
+	// \newenvironment{name}[1]%
+	//  {begin code}
+	//  {\end{list}   <- missing closing brace
+	//
+	// Should be:
+	//  {\end{list}}
+
+	anyFixed := false
+	lines := strings.Split(content, "\n")
+
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+
+		// Look for lines that start with {\end{ and don't have a matching closing brace
+		if strings.HasPrefix(trimmed, `{\end{`) {
+			// Count braces in this line
+			openBraces := strings.Count(trimmed, "{")
+			closeBraces := strings.Count(trimmed, "}")
+
+			// If there are more open braces than close braces, add the missing one
+			if openBraces > closeBraces {
+				// Check if the next line is empty or starts with a command (not a continuation)
+				isEndOfDefinition := false
+				if i+1 >= len(lines) {
+					isEndOfDefinition = true
+				} else {
+					nextTrimmed := strings.TrimSpace(lines[i+1])
+					// If next line is empty, starts with \, or starts with %, it's likely end of definition
+					if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, `\`) || strings.HasPrefix(nextTrimmed, `%`) {
+						isEndOfDefinition = true
+					}
+				}
+
+				if isEndOfDefinition {
+					// Add missing closing braces
+					missingBraces := openBraces - closeBraces
+					lines[i] = line + strings.Repeat("}", missingBraces)
+					anyFixed = true
+					logger.Debug("rule-based fix: added missing closing brace(s) to newenvironment definition",
+						logger.Int("line", i+1), logger.Int("count", missingBraces))
+				}
+			}
+		}
+	}
+
+	if anyFixed {
+		return strings.Join(lines, "\n"), true
+	}
+	return content, false
 }
 
 // fixLonelyItems fixes cases where \item appears after \end{itemize/enumerate/description}
@@ -1568,6 +1815,15 @@ func PreprocessTexFiles(dir string) error {
 		}
 
 		filesProcessed++
+
+		// Only apply QuickFix to translated files (files starting with "translated_")
+		// QuickFix is designed for translated documents and can break original documents
+		if !strings.HasPrefix(info.Name(), "translated_") {
+			relPath, _ := filepath.Rel(dir, path)
+			logger.Info("preprocessed tex file",
+				logger.String("file", relPath))
+			return nil
+		}
 
 		// Read file content
 		content, readErr := os.ReadFile(path)
@@ -1834,6 +2090,11 @@ func QuickFixWithReference(translated, original string) (string, bool) {
 	if original == "" {
 		return result, anyFixed
 	}
+	
+	// Apply translator's reference-based fixes (includes input command restoration)
+	// This must be done BEFORE ReferenceFixer to ensure \input commands are present
+	result = translator.ApplyReferenceBasedFixes(result, original)
+	anyFixed = true // ApplyReferenceBasedFixes always returns modified content
 	
 	// Apply reference-based fixes
 	fixer := NewReferenceFixer()

@@ -12,6 +12,8 @@ import {validator} from '../models';
 import {errors} from '../models';
 import {github} from '../models';
 
+export function AddInputHistory(arg1:string,arg2:string):Promise<void>;
+
 export function CancelPDFTranslation():Promise<void>;
 
 export function CancelProcess():Promise<void>;
@@ -30,9 +32,13 @@ export function ClearAllErrors():Promise<void>;
 
 export function ClearError(arg1:string):Promise<void>;
 
+export function ClearInputHistory():Promise<void>;
+
 export function ContinueTranslation(arg1:string):Promise<types.ProcessResult>;
 
 export function DeleteTranslatedPaper(arg1:string):Promise<void>;
+
+export function DownloadAndOpenGitHubTranslation(arg1:string,arg2:string,arg3:boolean):Promise<main.DownloadAndOpenResult>;
 
 export function DownloadBilingualPDF():Promise<string>;
 
@@ -57,6 +63,8 @@ export function GetCompiler():Promise<compiler.LaTeXCompiler>;
 export function GetConfig():Promise<config.ConfigManager>;
 
 export function GetDownloader():Promise<downloader.SourceDownloader>;
+
+export function GetInputHistory():Promise<Array<types.InputHistoryItem>>;
 
 export function GetLaTeXDownloadURL():Promise<string>;
 
@@ -112,6 +120,8 @@ export function ProcessSourceWithForce(arg1:string,arg2:boolean):Promise<types.P
 
 export function ReloadConfig():Promise<void>;
 
+export function RemoveInputHistory(arg1:string):Promise<void>;
+
 export function ReportErrorsToGitHub():Promise<github.IssueCreateResult>;
 
 export function RetranslateFromArxiv(arg1:string):Promise<types.ProcessResult>;
@@ -121,6 +131,8 @@ export function RetryFromError(arg1:string):Promise<types.ProcessResult>;
 export function SaveLastInput(arg1:string):Promise<void>;
 
 export function SaveSettings(arg1:string,arg2:string,arg3:string,arg4:number,arg5:string,arg6:string,arg7:number,arg8:string,arg9:string,arg10:string,arg11:number,arg12:boolean):Promise<void>;
+
+export function SaveTranslatedPDF(arg1:string):Promise<string>;
 
 export function SearchGitHubTranslation(arg1:string):Promise<github.TranslationSearchResult>;
 

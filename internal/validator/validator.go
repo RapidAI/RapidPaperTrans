@@ -240,9 +240,8 @@ func (v *SyntaxValidator) fixWithRetry(content string, errors []types.SyntaxErro
 
 // ChatCompletionRequest represents the request body for OpenAI chat completions API.
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
 }
 
 // Message represents a message in the chat completion request.
@@ -298,7 +297,6 @@ func (v *SyntaxValidator) doFix(content string, errors []types.SyntaxError) (str
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Temperature: 0.1, // Very low temperature for consistent fixes
 	}
 
 	jsonBody, err := json.Marshal(reqBody)

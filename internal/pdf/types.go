@@ -27,6 +27,7 @@ type TextBlock struct {
 	IsBold    bool    `json:"is_bold"`
 	IsItalic  bool    `json:"is_italic"`
 	BlockType string  `json:"block_type"` // paragraph, heading, caption, etc.
+	Rotation  int     `json:"rotation"`   // text rotation in degrees (0, 90, 180, 270)
 }
 
 // TranslatedBlock 翻译后的文本块
@@ -69,13 +70,14 @@ type PDFStatus struct {
 
 // TranslationResult 翻译结果
 type TranslationResult struct {
-	OriginalPDFPath   string           `json:"original_pdf_path"`
-	TranslatedPDFPath string           `json:"translated_pdf_path"`
-	TotalBlocks       int              `json:"total_blocks"`
-	TranslatedBlocks  int              `json:"translated_blocks"`
-	CachedBlocks      int              `json:"cached_blocks"`
-	TokensUsed        int              `json:"tokens_used"`
-	PageCountResult   *PageCountResult `json:"page_count_result,omitempty"` // 页数检测结果
+	OriginalPDFPath   string                    `json:"original_pdf_path"`
+	TranslatedPDFPath string                    `json:"translated_pdf_path"`
+	TotalBlocks       int                       `json:"total_blocks"`
+	TranslatedBlocks  int                       `json:"translated_blocks"`
+	CachedBlocks      int                       `json:"cached_blocks"`
+	TokensUsed        int                       `json:"tokens_used"`
+	PageCountResult   *PageCountResult          `json:"page_count_result,omitempty"`   // 页数检测结果
+	ContentValidation *ContentValidationResult  `json:"content_validation,omitempty"`  // 内容完整性检测结果
 }
 
 // CacheEntry 缓存条目

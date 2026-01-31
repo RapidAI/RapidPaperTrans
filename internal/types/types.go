@@ -10,6 +10,7 @@ type Config struct {
 	DefaultCompiler string `json:"default_compiler"`  // "pdflatex" 或 "xelatex"
 	WorkDirectory   string `json:"work_directory"`
 	LastInput       string `json:"last_input"`        // 最后一次输入的 ID/URL/路径
+	InputHistory    []InputHistoryItem `json:"input_history"` // 输入历史记录
 	Concurrency     int    `json:"concurrency"`       // 翻译并发数，用于 LaTeX 和 PDF 翻译的并发批次处理，默认为 3
 	// GitHub 分享配置
 	GitHubToken     string `json:"github_token"`      // GitHub Personal Access Token
@@ -19,6 +20,13 @@ type Config struct {
 	LibraryPageSize int    `json:"library_page_size"` // 浏览库每页显示数量，默认20
 	// 分享提示配置
 	SharePromptEnabled bool `json:"share_prompt_enabled"` // 翻译完成后是否提示分享，默认true
+}
+
+// InputHistoryItem 输入历史记录项
+type InputHistoryItem struct {
+	Input     string `json:"input"`      // 输入内容（arXiv ID、URL 或文件路径）
+	Timestamp int64  `json:"timestamp"`  // 时间戳（Unix 毫秒）
+	Type      string `json:"type"`       // 类型：arxiv, url, zip, pdf
 }
 
 // PaperCategory AI论文类别
@@ -191,6 +199,7 @@ const (
 	ErrCompile      ErrorCode = "COMPILE_ERROR"
 	ErrConfig       ErrorCode = "CONFIG_ERROR"
 	ErrInternal     ErrorCode = "INTERNAL_ERROR"
+	ErrTranslation  ErrorCode = "TRANSLATION_ERROR"
 )
 
 // AppError 应用错误

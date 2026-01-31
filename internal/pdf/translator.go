@@ -16,19 +16,22 @@ import (
 // PDFTranslator 是 PDF 翻译功能的主控制器
 // Requirements: 1.1, 3.5, 5.5 - 加载 PDF、执行翻译流程、显示处理状态
 type PDFTranslator struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	config        *types.Config
-	parser        *PDFParser
-	translator    *BatchTranslator
-	generator     *PDFGenerator
-	cache         *TranslationCache
-	workDir       string
-	currentFile   string
-	status        *PDFStatus
-	textBlocks    []TextBlock
+	ctx              context.Context
+	cancel           context.CancelFunc
+	config           *types.Config
+	parser           *PDFParser
+	translator       *BatchTranslator
+	generator        *PDFGenerator
+	cache            *TranslationCache
+	workDir          string
+	currentFile      string
+	status           *PDFStatus
+	textBlocks       []TextBlock
 	translatedBlocks []TranslatedBlock
-	mu            sync.RWMutex
+	mu               sync.RWMutex
+	
+	// Callback for page completion events (for progressive display)
+	pageCompleteCallback func(currentPage, totalPages int, outputPath string)
 }
 
 // PDFTranslatorConfig holds configuration options for creating a PDFTranslator
@@ -166,114 +169,93 @@ func (p *PDFTranslator) LoadPDF(filePath string) (*PDFInfo, error) {
 // TranslatePDF 翻译 PDF 内容
 // Requirements: 3.5 - 显示翻译进度（已完成块数/总块数）
 // Property 7: 状态有效性 - PDFStatus的Phase应是有效枚举值，Progress在0-100范围内
+// Uses PyMuPDF for extraction and overlay with progressive page display
 func (p *PDFTranslator) TranslatePDF() (*TranslationResult, error) {
 	p.mu.Lock()
 
 	logger.Info("starting PDF translation", logger.String("file", p.currentFile))
 
 	// Check if PDF is loaded
-	if p.currentFile == "" || len(p.textBlocks) == 0 {
+	if p.currentFile == "" {
 		p.mu.Unlock()
 		return nil, NewPDFError(ErrTranslateFailed, "请先加载 PDF 文件", nil)
 	}
 
-	// Check if translator is configured
-	if p.translator == nil {
+	// Check if config is available
+	if p.config == nil || p.config.OpenAIAPIKey == "" {
 		p.mu.Unlock()
 		return nil, NewPDFError(ErrTranslateFailed, "翻译器未配置，请检查 API 设置", nil)
 	}
 
-	// Update status to translating
-	p.updateStatusLocked(PDFPhaseTranslating, 0, "正在翻译...")
-
-	// Load cache
-	if err := p.cache.Load(); err != nil {
-		logger.Warn("failed to load cache, continuing without cache", logger.Err(err))
-	}
-
-	// Filter out formula blocks (don't translate mathematical formulas)
-	textOnlyBlocks := make([]TextBlock, 0)
-	formulaBlocks := make([]TextBlock, 0)
-	for _, block := range p.textBlocks {
-		if block.BlockType == "formula" {
-			formulaBlocks = append(formulaBlocks, block)
-			logger.Info("skipping formula block", logger.String("text", block.Text))
-		} else {
-			textOnlyBlocks = append(textOnlyBlocks, block)
-		}
-	}
-
-	logger.Info("filtered blocks",
-		logger.Int("textBlocks", len(textOnlyBlocks)),
-		logger.Int("formulaBlocks", len(formulaBlocks)))
-
-	// Filter cached blocks (only for text blocks)
-	cachedBlocks, uncachedBlocks := p.cache.FilterCached(textOnlyBlocks)
-	p.status.CachedBlocks = len(cachedBlocks)
-
-	logger.Info("cache filter results",
-		logger.Int("cached", len(cachedBlocks)),
-		logger.Int("uncached", len(uncachedBlocks)))
-
-	// Store cached blocks in results
-	p.translatedBlocks = make([]TranslatedBlock, 0, len(p.textBlocks))
-	p.translatedBlocks = append(p.translatedBlocks, cachedBlocks...)
-
-	// Add formula blocks as-is (no translation)
-	for _, block := range formulaBlocks {
-		p.translatedBlocks = append(p.translatedBlocks, TranslatedBlock{
-			TextBlock:      block,
-			TranslatedText: block.Text, // Keep original formula text
-			FromCache:      false,
-		})
-	}
-
-	// Calculate initial progress based on cached blocks
-	totalBlocks := len(textOnlyBlocks)
-	completedBlocks := len(cachedBlocks)
-	p.status.CompletedBlocks = completedBlocks
-	p.updateProgressLocked(completedBlocks, totalBlocks)
-
-	p.mu.Unlock()
-
-	// Translate uncached blocks
-	if len(uncachedBlocks) > 0 {
-		translatedUncached, err := p.translateBlocksWithProgress(uncachedBlocks, completedBlocks, totalBlocks)
-		if err != nil {
-			p.mu.Lock()
-			p.updateStatusLocked(PDFPhaseError, 0, err.Error())
-			p.status.Error = err.Error()
-			p.mu.Unlock()
-			return nil, err
-		}
-
-		p.mu.Lock()
-		p.translatedBlocks = append(p.translatedBlocks, translatedUncached...)
-
-		// Update cache with new translations
-		for _, block := range translatedUncached {
-			p.cache.Set(block.Text, block.TranslatedText)
-		}
-
-		// Save cache
-		if err := p.cache.Save(); err != nil {
-			logger.Warn("failed to save cache", logger.Err(err))
-		}
-		p.mu.Unlock()
-	}
-
-	// Generate translated PDF
-	p.mu.Lock()
-	p.updateStatusLocked(PDFPhaseGenerating, 90, "正在生成翻译后的 PDF...")
+	p.updateStatusLocked(PDFPhaseTranslating, 5, "正在准备翻译...")
+	pageCallback := p.pageCompleteCallback
 	p.mu.Unlock()
 
 	outputPath := p.generator.GetOutputPath(p.currentFile)
-	if err := p.generator.GeneratePDF(p.currentFile, p.translatedBlocks, outputPath); err != nil {
+	babelTranslator := NewBabelDocTranslator(BabelDocConfig{WorkDir: p.workDir})
+
+	// Use PyMuPDF-based translation with progressive page updates
+	err := babelTranslator.TranslatePDFWithPyMuPDFProgressive(
+		p.currentFile,
+		outputPath,
+		p.config.OpenAIAPIKey,
+		p.config.OpenAIBaseURL,
+		p.config.OpenAIModel,
+		func(msg string) {
+			p.mu.Lock()
+			p.status.Message = msg
+			p.mu.Unlock()
+		},
+		func(currentPage, totalPages int, outPath string) {
+			// Update progress based on page completion
+			p.mu.Lock()
+			progress := 10 + (currentPage * 80 / totalPages)
+			if progress > 90 {
+				progress = 90
+			}
+			p.status.Progress = progress
+			p.status.Message = fmt.Sprintf("已翻译 %d/%d 页", currentPage, totalPages)
+			p.mu.Unlock()
+			
+			// Call external page callback if set
+			if pageCallback != nil {
+				pageCallback(currentPage, totalPages, outPath)
+			}
+		},
+	)
+
+	if err != nil {
 		p.mu.Lock()
 		p.updateStatusLocked(PDFPhaseError, 0, err.Error())
 		p.status.Error = err.Error()
 		p.mu.Unlock()
 		return nil, err
+	}
+
+	// Check page count difference
+	var pageCountResult *PageCountResult
+	if pcResult, err := babelTranslator.CheckPageCountDifference(p.currentFile, outputPath); err != nil {
+		logger.Warn("failed to check page count", logger.Err(err))
+	} else {
+		pageCountResult = pcResult
+	}
+
+	// Validate content completeness (sections, appendices, etc.)
+	p.mu.Lock()
+	p.status.Message = "正在验证内容完整性..."
+	p.mu.Unlock()
+
+	var contentValidation *ContentValidationResult
+	contentValidator := NewContentValidator(p.workDir)
+	if cvResult, err := contentValidator.ValidateContent(p.currentFile, outputPath); err != nil {
+		logger.Warn("failed to validate content completeness", logger.Err(err))
+	} else {
+		contentValidation = cvResult
+		if !cvResult.IsComplete {
+			logger.Warn("content validation detected missing sections",
+				logger.Int("missingSections", len(cvResult.MissingSections)),
+				logger.Float64("score", cvResult.Score))
+		}
 	}
 
 	// Update status to complete
@@ -282,21 +264,27 @@ func (p *PDFTranslator) TranslatePDF() (*TranslationResult, error) {
 	p.mu.Unlock()
 
 	result := &TranslationResult{
-		OriginalPDFPath:   p.currentFile,
-		TranslatedPDFPath: outputPath,
-		TotalBlocks:       totalBlocks,
-		TranslatedBlocks:  len(uncachedBlocks),
-		CachedBlocks:      len(cachedBlocks),
+		OriginalPDFPath:     p.currentFile,
+		TranslatedPDFPath:   outputPath,
+		TotalBlocks:         0,
+		TranslatedBlocks:    0,
+		CachedBlocks:        0,
+		PageCountResult:     pageCountResult,
+		ContentValidation:   contentValidation,
 	}
 
 	logger.Info("PDF translation completed",
-		logger.String("output", outputPath),
-		logger.Int("totalBlocks", totalBlocks),
-		logger.Int("translatedBlocks", len(uncachedBlocks)),
-		logger.Int("cachedBlocks", len(cachedBlocks)),
-		logger.Int("formulaBlocks", len(formulaBlocks)))
+		logger.String("output", outputPath))
 
 	return result, nil
+}
+
+// max returns the larger of two integers
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // translateBlocksWithProgress translates blocks and updates progress
@@ -557,4 +545,13 @@ func (p *PDFTranslator) Close() error {
 	}
 
 	return nil
+}
+
+// SetPageCompleteCallback sets the callback function for page completion events.
+// This callback is called after each page is translated, allowing for progressive display.
+// The callback receives: currentPage (1-based), totalPages, and outputPath.
+func (p *PDFTranslator) SetPageCompleteCallback(callback func(currentPage, totalPages int, outputPath string)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pageCompleteCallback = callback
 }

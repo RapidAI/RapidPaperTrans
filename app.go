@@ -1,4 +1,4 @@
-package main
+﻿package main
 
 import (
 	"archive/zip"
@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"sync"
 	"time"
@@ -179,7 +180,8 @@ func (a *App) startup(ctx context.Context) {
 
 	// Initialize compiler with default compiler from config
 	defaultCompiler := a.config.GetDefaultCompiler()
-	a.compiler = compiler.NewLaTeXCompiler(defaultCompiler, a.workDir, 0)
+	// Use 10 minute timeout for large projects
+	a.compiler = compiler.NewLaTeXCompiler(defaultCompiler, a.workDir, 10*time.Minute)
 	logger.Debug("compiler initialized", logger.String("compiler", defaultCompiler))
 
 	// Initialize validator with API key and base URL from config
@@ -198,6 +200,19 @@ func (a *App) startup(ctx context.Context) {
 		WorkDir: a.workDir,
 	}
 	a.pdfTranslator = pdf.NewPDFTranslator(pdfConfig)
+	
+	// Set page complete callback for progressive PDF display
+	a.pdfTranslator.SetPageCompleteCallback(func(currentPage, totalPages int, outputPath string) {
+		// Emit event to frontend for progressive display
+		a.safeEmit("pdf-page-translated", map[string]interface{}{
+			"currentPage": currentPage,
+			"totalPages":  totalPages,
+			"outputPath":  outputPath,
+		})
+		logger.Debug("PDF page translated",
+			logger.Int("currentPage", currentPage),
+			logger.Int("totalPages", totalPages))
+	})
 	logger.Debug("PDF translator initialized")
 
 	// Initialize result manager
@@ -523,12 +538,20 @@ func (a *App) CheckExistingTranslation(input string) (*results.ExistingTranslati
 }
 
 // ProcessSourceWithForce processes the input source, optionally forcing re-translation
-// If force is false and a translation already exists, returns an error
-// If force is true, deletes existing translation and starts fresh
+// The force parameter behavior depends on the existing translation status:
+// - If translation is complete: force=true means re-translate, force=false means return existing
+// - If translation can continue: force=true means continue, force=false means restart
+// - If translation failed: force=true means retry, force=false means give up
 func (a *App) ProcessSourceWithForce(input string, force bool) (*types.ProcessResult, error) {
 	logger.Info("processing source with force option",
 		logger.String("input", input),
 		logger.Bool("force", force))
+
+	// Check if already processing to prevent duplicate calls
+	if a.IsProcessing() {
+		logger.Warn("ProcessSourceWithForce called while already processing, ignoring duplicate call")
+		return nil, types.NewAppError(types.ErrInternal, "已有翻译任务正在进行中", nil)
+	}
 
 	// Check for existing translation
 	existingInfo, err := a.CheckExistingTranslation(input)
@@ -536,9 +559,20 @@ func (a *App) ProcessSourceWithForce(input string, force bool) (*types.ProcessRe
 		logger.Warn("failed to check existing translation", logger.Err(err))
 		// Continue anyway - don't block translation due to check failure
 	} else if existingInfo != nil && existingInfo.Exists {
-		if !force {
-			// Return the existing result instead of re-translating
-			if existingInfo.IsComplete && existingInfo.PaperInfo != nil {
+		if existingInfo.IsComplete {
+			// Translation is complete
+			if force {
+				// User wants to re-translate - delete existing and start fresh
+				if existingInfo.PaperInfo != nil && existingInfo.PaperInfo.ArxivID != "" {
+					logger.Info("deleting existing translation for force re-translation",
+						logger.String("arxivID", existingInfo.PaperInfo.ArxivID))
+					if err := a.results.DeletePaper(existingInfo.PaperInfo.ArxivID); err != nil {
+						logger.Warn("failed to delete existing paper", logger.Err(err))
+					}
+				}
+				// Fall through to ProcessSource
+			} else {
+				// Return the existing result
 				logger.Info("returning existing translation result",
 					logger.String("arxivID", existingInfo.PaperInfo.ArxivID))
 				return &types.ProcessResult{
@@ -547,22 +581,26 @@ func (a *App) ProcessSourceWithForce(input string, force bool) (*types.ProcessRe
 					SourceID:          existingInfo.PaperInfo.ArxivID,
 				}, nil
 			}
-			// If not complete, we can continue
-			if existingInfo.CanContinue && existingInfo.PaperInfo != nil {
+		} else if existingInfo.CanContinue {
+			// Translation can be continued (interrupted or error state)
+			if force {
+				// User wants to continue from where it left off
 				logger.Info("continuing existing translation",
 					logger.String("arxivID", existingInfo.PaperInfo.ArxivID))
 				return a.ContinueTranslation(existingInfo.PaperInfo.ArxivID)
-			}
-		} else {
-			// Force re-translation - delete existing
-			if existingInfo.PaperInfo != nil && existingInfo.PaperInfo.ArxivID != "" {
-				logger.Info("deleting existing translation for force re-translation",
-					logger.String("arxivID", existingInfo.PaperInfo.ArxivID))
-				if err := a.results.DeletePaper(existingInfo.PaperInfo.ArxivID); err != nil {
-					logger.Warn("failed to delete existing paper", logger.Err(err))
+			} else {
+				// User wants to restart from scratch - delete existing
+				if existingInfo.PaperInfo != nil && existingInfo.PaperInfo.ArxivID != "" {
+					logger.Info("deleting existing translation for restart",
+						logger.String("arxivID", existingInfo.PaperInfo.ArxivID))
+					if err := a.results.DeletePaper(existingInfo.PaperInfo.ArxivID); err != nil {
+						logger.Warn("failed to delete existing paper", logger.Err(err))
+					}
 				}
+				// Fall through to ProcessSource
 			}
 		}
+		// For other cases (e.g., pending), just start fresh
 	}
 
 	return a.ProcessSource(input)
@@ -582,6 +620,12 @@ func (a *App) ProcessSourceWithForce(input string, force bool) (*types.ProcessRe
 // Validates: Requirements 1.1-1.5, 2.1-2.5, 3.1-3.5
 func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	logger.Info("starting source processing", logger.String("input", input))
+
+	// Check if already processing to prevent duplicate calls
+	if a.IsProcessing() {
+		logger.Warn("ProcessSource called while already processing, ignoring duplicate call")
+		return nil, types.NewAppError(types.ErrInternal, "已有翻译任务正在进行中", nil)
+	}
 
 	// Create a cancellable context for this processing session
 	ctx, cancel := context.WithCancel(a.ctx)
@@ -682,7 +726,7 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		}
 
 	default:
-		err := types.NewAppError(types.ErrInvalidInput, "ֵ֧", nil)
+		err := types.NewAppError(types.ErrInvalidInput, "不支持的输入类型", nil)
 		logger.Error("unsupported input type", err)
 		a.updateStatusError(err.Error())
 		return nil, err
@@ -752,6 +796,24 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		logger.Warn("processing cancelled")
 		a.updateStatusError("已取消")
 		return nil, types.NewAppError(types.ErrInternal, "已取消", ctx.Err())
+	}
+
+	// Detect project size and adjust timeout if needed
+	texFileCount := len(sourceInfo.AllTexFiles)
+	isLargeProject := texFileCount > 20
+	
+	if isLargeProject {
+		logger.Info("detected large project", 
+			logger.Int("texFiles", texFileCount))
+		a.updateStatus(types.PhaseCompiling, 28, 
+			fmt.Sprintf("检测到大型项目（%d 个文件），编译可能需要较长时间...", texFileCount))
+		
+		// For very large projects (50+ files), use even longer timeout
+		if texFileCount > 50 {
+			a.compiler = compiler.NewLaTeXCompiler(a.compiler.GetCompiler(), a.workDir, 15*time.Minute)
+			logger.Info("using extended timeout for very large project", 
+				logger.String("timeout", "15 minutes"))
+		}
 	}
 
 	// Step 4: Compile original document to PDF
@@ -831,7 +893,9 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	}
 
 	// Get the translated main file content
-	mainFileName := filepath.Base(mainTexPath)
+	// mainTexFile is the relative path (e.g., "deep-representation-learning-book-main\book-main.tex")
+	// which matches the keys in translatedFiles
+	mainFileName := mainTexFile
 	translatedContent := translatedFiles[mainFileName]
 
 	// Check for cancellation
@@ -873,6 +937,16 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 				logger.Warn("syntax fix failed, will rely on compile-fix loop", logger.Err(err))
 			} else {
 				logger.Info("syntax errors fixed successfully")
+				
+				// IMPORTANT: Re-apply reference-based fixes after LLM syntax fix
+				// The LLM may have re-introduced wrongly commented environments
+				// Read original content for reference-based fixes
+				originalMainPath := filepath.Join(sourceInfo.ExtractDir, mainFileName)
+				if originalContent, readErr := os.ReadFile(originalMainPath); readErr == nil {
+					translatedContent = translator.ApplyReferenceBasedFixes(translatedContent, string(originalContent))
+					logger.Info("re-applied reference-based fixes after syntax fix")
+				}
+				
 				// Update the main file in translatedFiles
 				translatedFiles[mainFileName] = translatedContent
 			}
@@ -896,6 +970,8 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	a.updateStatus(types.PhaseValidating, 70, "保存翻译文件...")
 
 	// Ensure ctex package is included for Chinese support in main file
+	// Get the latest content from translatedFiles (it may have been updated by syntax fix)
+	translatedContent = translatedFiles[mainFileName]
 	translatedContent = ensureCtexPackage(translatedContent)
 	translatedFiles[mainFileName] = translatedContent
 
@@ -914,10 +990,39 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 			translatedFiles[relPath] = content
 		}
 
+		// Check if content has thebibliography before fix
+		hasBibBefore := strings.Contains(content, `\begin{thebibliography}`)
+		logger.Debug("before fixDuplicateThebibliographyInPreamble",
+			logger.String("relPath", relPath),
+			logger.Bool("hasThebibliography", hasBibBefore))
+
+		// Fix duplicate thebibliography in preamble (before \begin{document})
+		// This can happen when LLM incorrectly inserts .bbl content during translation
+		content = fixDuplicateThebibliographyInPreamble(content)
+		translatedFiles[relPath] = content
+
+		// Check if content has thebibliography after fix
+		hasBibAfter := strings.Contains(content, `\begin{thebibliography}`)
+		logger.Debug("after fixDuplicateThebibliographyInPreamble",
+			logger.String("relPath", relPath),
+			logger.Bool("hasThebibliography", hasBibAfter))
+
+		// IMPORTANT: Fix incomplete tabular column specs AFTER all other fixes
+		// This must be done last because QuickFix might remove the closing braces we add
+		content = translator.FixIncompleteTabularColumnSpec(content)
+		translatedFiles[relPath] = content
+
 		var savePath string
 		if relPath == mainFileName {
-			// Main file gets "translated_" prefix
-			savePath = filepath.Join(sourceInfo.ExtractDir, "translated_"+relPath)
+			// Main file gets "translated_" prefix (only to filename, not directory)
+			dir := filepath.Dir(relPath)
+			base := filepath.Base(relPath)
+			translatedFileName := "translated_" + base
+			if dir == "." {
+				savePath = filepath.Join(sourceInfo.ExtractDir, translatedFileName)
+			} else {
+				savePath = filepath.Join(sourceInfo.ExtractDir, dir, translatedFileName)
+			}
 		} else {
 			// Input files are saved in place (overwrite original)
 			savePath = filepath.Join(sourceInfo.ExtractDir, relPath)
@@ -928,6 +1033,14 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 			logger.String("savePath", savePath),
 			logger.Int("contentLength", len(content)),
 			logger.Bool("isMainFile", relPath == mainFileName))
+
+		// Ensure parent directory exists
+		saveDir := filepath.Dir(savePath)
+		if err := os.MkdirAll(saveDir, 0755); err != nil {
+			logger.Error("failed to create directory for translated file", err, logger.String("dir", saveDir))
+			a.updateStatusError(fmt.Sprintf("创建目录失败: %v", err))
+			return nil, types.NewAppError(types.ErrInternal, "创建目录失败", err)
+		}
 
 		err = os.WriteFile(savePath, []byte(content), 0644)
 		if err != nil {
@@ -940,7 +1053,16 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 	// Update translatedContent with the fixed version
 	translatedContent = translatedFiles[mainFileName]
 
-	translatedTexPath := filepath.Join(sourceInfo.ExtractDir, "translated_"+mainTexFile)
+	// Construct translated tex path (add "translated_" prefix to filename only)
+	mainTexDir := filepath.Dir(mainTexFile)
+	mainTexBase := filepath.Base(mainTexFile)
+	translatedFileName := "translated_" + mainTexBase
+	var translatedTexPath string
+	if mainTexDir == "." {
+		translatedTexPath = filepath.Join(sourceInfo.ExtractDir, translatedFileName)
+	} else {
+		translatedTexPath = filepath.Join(sourceInfo.ExtractDir, mainTexDir, translatedFileName)
+	}
 	translatedOutputDir := filepath.Join(sourceInfo.ExtractDir, "output_translated")
 
 	// Step 8: Compile translated document with hierarchical auto-fix
@@ -966,10 +1088,18 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		model := a.config.GetModel()
 		fixer := compiler.NewLaTeXFixerWithAgent(apiKey, baseURL, model, model, true)
 
+		// Construct translated tex file path (add "translated_" prefix to filename only)
+		mainTexDir := filepath.Dir(mainTexFile)
+		mainTexBase := filepath.Base(mainTexFile)
+		translatedMainTexFile := filepath.Join(mainTexDir, "translated_"+mainTexBase)
+		if mainTexDir == "." {
+			translatedMainTexFile = "translated_" + mainTexBase
+		}
+
 		// Run hierarchical fix with progress callback
 		fixResult, fixErr := fixer.HierarchicalFixCompilationErrors(
 			sourceInfo.ExtractDir,
-			"translated_"+mainTexFile,
+			translatedMainTexFile,
 			translatedResult.Log,
 			a.compiler,
 			translatedOutputDir,
@@ -1446,8 +1576,15 @@ func applyRuleBasedFixes(content string, compileLog string) (string, bool) {
 	openBraces := strings.Count(fixed, "{") - strings.Count(fixed, "\\{")
 	closeBraces := strings.Count(fixed, "}") - strings.Count(fixed, "\\}")
 	if openBraces > closeBraces {
-		for i := 0; i < openBraces-closeBraces; i++ {
-			fixed += "}"
+		// Add missing closing braces BEFORE \end{document} if it exists
+		missingBraces := strings.Repeat("}", openBraces-closeBraces)
+		endDocIdx := strings.LastIndex(fixed, "\\end{document}")
+		if endDocIdx != -1 {
+			// Insert before \end{document}
+			fixed = fixed[:endDocIdx] + missingBraces + "\n" + fixed[endDocIdx:]
+		} else {
+			// No \end{document}, append at end
+			fixed += missingBraces
 		}
 		anyFixed = true
 		logger.Debug("rule-based fix: added missing closing braces",
@@ -1565,7 +1702,7 @@ func (a *App) CancelProcess() error {
 		return nil
 	}
 	logger.Warn("no process to cancel")
-	return types.NewAppError(types.ErrInternal, "ûڽеĴ", nil)
+	return types.NewAppError(types.ErrInternal, "没有正在进行的处理", nil)
 }
 
 // GetPaperCategories returns all available paper categories for the frontend.
@@ -1803,6 +1940,38 @@ func (a *App) SaveLastInput(input string) {
 		return
 	}
 	a.config.SetLastInput(input)
+}
+
+// GetInputHistory returns the input history list.
+func (a *App) GetInputHistory() []types.InputHistoryItem {
+	if a.config == nil {
+		return []types.InputHistoryItem{}
+	}
+	return a.config.GetInputHistory()
+}
+
+// AddInputHistory adds an input to the history list.
+func (a *App) AddInputHistory(input string, inputType string) {
+	if a.config == nil {
+		return
+	}
+	a.config.AddInputHistory(input, inputType)
+}
+
+// RemoveInputHistory removes a specific input from history.
+func (a *App) RemoveInputHistory(input string) {
+	if a.config == nil {
+		return
+	}
+	a.config.RemoveInputHistory(input)
+}
+
+// ClearInputHistory clears all input history.
+func (a *App) ClearInputHistory() {
+	if a.config == nil {
+		return
+	}
+	a.config.ClearInputHistory()
 }
 
 // GetPDFDataURL reads a PDF file and returns it as a data URL for display in iframe.
@@ -2662,12 +2831,18 @@ func (a *App) OpenPaperResult(arxivID string) (*types.ProcessResult, error) {
 	// Store result for download
 	a.lastResult = result
 
-	// Emit events to frontend
+	// Emit events to frontend with arXiv ID
 	if info.OriginalPDF != "" {
-		a.safeEmit(EventOriginalPDFReady, info.OriginalPDF)
+		a.safeEmit(EventOriginalPDFReady, map[string]interface{}{
+			"pdfPath": info.OriginalPDF,
+			"arxivId": arxivID,
+		})
 	}
 	if info.TranslatedPDF != "" {
-		a.safeEmit(EventTranslatedPDFReady, info.TranslatedPDF)
+		a.safeEmit(EventTranslatedPDFReady, map[string]interface{}{
+			"pdfPath": info.TranslatedPDF,
+			"arxivId": arxivID,
+		})
 	}
 
 	logger.Info("paper result opened", logger.String("arxivID", arxivID))
@@ -2944,6 +3119,55 @@ func (a *App) GetTranslatedPDFPath() string {
 	return a.pdfTranslator.GetTranslatedPDFPath()
 }
 
+// SaveTranslatedPDF saves the translated PDF to a user-selected location.
+// This method is exposed to the frontend via Wails bindings.
+func (a *App) SaveTranslatedPDF(sourcePath string) (string, error) {
+	logger.Debug("SaveTranslatedPDF called", logger.String("sourcePath", sourcePath))
+
+	if sourcePath == "" {
+		return "", types.NewAppError(types.ErrInvalidInput, "源文件路径为空", nil)
+	}
+
+	// Check if source file exists
+	if _, err := os.Stat(sourcePath); os.IsNotExist(err) {
+		return "", types.NewAppError(types.ErrFileNotFound, "源文件不存在", err)
+	}
+
+	// Generate default filename
+	defaultFilename := filepath.Base(sourcePath)
+
+	// Open save dialog
+	savePath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "保存翻译后的 PDF",
+		DefaultFilename: defaultFilename,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "PDF 文件 (*.pdf)", Pattern: "*.pdf"},
+		},
+	})
+	if err != nil {
+		logger.Error("save dialog error", err)
+		return "", types.NewAppError(types.ErrInternal, "打开保存对话框失败", err)
+	}
+	if savePath == "" {
+		return "", nil // User cancelled
+	}
+
+	// Copy the file
+	srcData, err := os.ReadFile(sourcePath)
+	if err != nil {
+		logger.Error("failed to read source PDF", err)
+		return "", types.NewAppError(types.ErrFileNotFound, "读取源 PDF 失败", err)
+	}
+
+	if err := os.WriteFile(savePath, srcData, 0644); err != nil {
+		logger.Error("failed to write PDF", err)
+		return "", types.NewAppError(types.ErrInternal, "保存 PDF 失败", err)
+	}
+
+	logger.Info("Translated PDF saved", logger.String("path", savePath))
+	return savePath, nil
+}
+
 // OpenPDFFileDialog opens a file selection dialog for selecting PDF files.
 // Returns the selected file path or empty string if cancelled.
 // This method is exposed to the frontend via Wails bindings.
@@ -2996,9 +3220,63 @@ func (z *ZipWriter) Close() error {
 	return z.writer.Close()
 }
 
+// fixDuplicateThebibliographyInPreamble removes thebibliography environment from preamble.
+// The thebibliography environment should NEVER be in the preamble (before \begin{document}).
+// This can happen when LLM incorrectly inserts .bbl content during translation.
+func fixDuplicateThebibliographyInPreamble(content string) string {
+	// Find \begin{document} position
+	beginDocIdx := strings.Index(content, `\begin{document}`)
+	if beginDocIdx == -1 {
+		logger.Debug("fixDuplicateThebibliographyInPreamble: no \\begin{document} found")
+		return content
+	}
+
+	preamble := content[:beginDocIdx]
+	body := content[beginDocIdx:]
+
+	// Check if thebibliography exists in preamble
+	preambleHasBib := strings.Contains(preamble, `\begin{thebibliography}`)
+
+	logger.Debug("fixDuplicateThebibliographyInPreamble: checking for thebibliography in preamble",
+		logger.Bool("preambleHasBib", preambleHasBib))
+
+	if !preambleHasBib {
+		// No thebibliography in preamble, return as is
+		return content
+	}
+
+	logger.Info("fixDuplicateThebibliographyInPreamble: found thebibliography in preamble, removing")
+
+	// Remove thebibliography environment from preamble
+	// Find the start and end of the thebibliography environment in preamble
+	bibStartIdx := strings.Index(preamble, `\begin{thebibliography}`)
+	if bibStartIdx == -1 {
+		return content
+	}
+
+	bibEndIdx := strings.Index(preamble[bibStartIdx:], `\end{thebibliography}`)
+	if bibEndIdx == -1 {
+		logger.Warn("fixDuplicateThebibliographyInPreamble: no \\end{thebibliography} found in preamble")
+		return content
+	}
+	bibEndIdx += bibStartIdx + len(`\end{thebibliography}`)
+
+	// Remove the thebibliography environment from preamble
+	// Also remove any trailing newlines
+	for bibEndIdx < len(preamble) && (preamble[bibEndIdx] == '\n' || preamble[bibEndIdx] == '\r') {
+		bibEndIdx++
+	}
+
+	newPreamble := preamble[:bibStartIdx] + preamble[bibEndIdx:]
+	logger.Info("removed thebibliography from preamble",
+		logger.Int("removedBytes", bibEndIdx-bibStartIdx))
+
+	return newPreamble + body
+}
+
 // ensureCtexPackage ensures the ctex package is included in the LaTeX document for Chinese support.
 // It adds \usepackage{ctex} after \documentclass if not already present.
-// It also fixes microtype compatibility issues with XeLaTeX.
+// It also fixes microtype compatibility issues with XeLaTeX and removes conflicting CJK packages.
 func ensureCtexPackage(content string) string {
 	// Check if ctex is already included
 	if strings.Contains(content, "\\usepackage{ctex}") || strings.Contains(content, "\\usepackage[") && strings.Contains(content, "ctex") {
@@ -3030,6 +3308,27 @@ func ensureCtexPackage(content string) string {
 		}
 	}
 
+	// Remove CJKutf8 package which conflicts with ctex/xeCJK
+	// When using XeLaTeX with ctex, xeCJK is used instead and CJKutf8 is incompatible
+	if strings.Contains(content, "\\usepackage{CJKutf8}") {
+		content = strings.Replace(content, "\\usepackage{CJKutf8}", "% \\usepackage{CJKutf8} % Commented out - using ctex instead", 1)
+		logger.Info("commented out CJKutf8 package (conflicts with ctex)")
+	}
+
+	// Remove CJK* environment which is not defined when using xeCJK
+	// Pattern: \begin{CJK*}{...}{...} ... \end{CJK*}
+	cjkBeginPattern := regexp.MustCompile(`\\begin\{CJK\*\}\{[^}]*\}\{[^}]*\}\s*\n?`)
+	if cjkBeginPattern.MatchString(content) {
+		content = cjkBeginPattern.ReplaceAllString(content, "% CJK* environment removed - using ctex instead\n")
+		logger.Info("removed \\begin{CJK*} (conflicts with ctex)")
+	}
+
+	cjkEndPattern := regexp.MustCompile(`\\end\{CJK\*\}\s*\n?`)
+	if cjkEndPattern.MatchString(content) {
+		content = cjkEndPattern.ReplaceAllString(content, "% \\end{CJK*} removed\n")
+		logger.Info("removed \\end{CJK*} (conflicts with ctex)")
+	}
+
 	// Fix microtype compatibility with XeLaTeX
 	// microtype with expansion/protrusion can cause "Cannot use XeTeXglyph" errors
 	// Replace \usepackage{microtype} with a XeLaTeX-compatible version
@@ -3053,9 +3352,111 @@ func ensureCtexPackage(content string) string {
 	return content
 }
 
+// needsTranslation checks if a tex file contains translatable content.
+// Files that only contain LaTeX command definitions or tables don't need translation.
+func needsTranslation(content string) bool {
+	// Count different types of content
+	lines := strings.Split(content, "\n")
+	
+	commandDefCount := 0
+	tableStructureCount := 0
+	textContentCount := 0
+	
+	// Check if the file is primarily a table
+	hasTableEnv := strings.Contains(content, "\\begin{table") || strings.Contains(content, "\\begin{tabular")
+	
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Skip empty lines and comments
+		if trimmed == "" || strings.HasPrefix(trimmed, "%") {
+			continue
+		}
+		
+		// Count command definitions (including the whole line)
+		if strings.HasPrefix(trimmed, "\\newcommand") ||
+			strings.HasPrefix(trimmed, "\\renewcommand") ||
+			strings.HasPrefix(trimmed, "\\def") ||
+			strings.HasPrefix(trimmed, "\\let") ||
+			strings.HasPrefix(trimmed, "\\DeclareMathOperator") ||
+			strings.HasPrefix(trimmed, "\\newlength") ||
+			strings.HasPrefix(trimmed, "\\setlength") ||
+			strings.HasPrefix(trimmed, "\\newcounter") ||
+			strings.HasPrefix(trimmed, "\\setcounter") ||
+			strings.HasPrefix(trimmed, "\\DeclareOption") ||
+			strings.HasPrefix(trimmed, "\\ProcessOptions") ||
+			strings.HasPrefix(trimmed, "\\RequirePackage") ||
+			strings.HasPrefix(trimmed, "\\ProvidesPackage") ||
+			strings.HasPrefix(trimmed, "\\ProvidesClass") {
+			commandDefCount++
+			continue
+		}
+		
+		// Count table structure lines (tabular, toprule, midrule, etc.)
+		if strings.Contains(trimmed, "\\begin{tabular") ||
+			strings.Contains(trimmed, "\\end{tabular") ||
+			strings.Contains(trimmed, "\\begin{table") ||
+			strings.Contains(trimmed, "\\end{table") ||
+			strings.Contains(trimmed, "\\toprule") ||
+			strings.Contains(trimmed, "\\midrule") ||
+			strings.Contains(trimmed, "\\bottomrule") ||
+			strings.Contains(trimmed, "\\hline") ||
+			strings.Contains(trimmed, "\\cline") ||
+			strings.Contains(trimmed, "\\multicolumn") ||
+			strings.Contains(trimmed, "\\resizebox") ||
+			strings.Contains(trimmed, "\\centering") ||
+			strings.Contains(trimmed, "\\caption") ||
+			strings.Contains(trimmed, "\\label") ||
+			strings.HasPrefix(trimmed, "&") ||
+			strings.HasSuffix(trimmed, "\\\\") {
+			tableStructureCount++
+			continue
+		}
+		
+		// Skip lines that are mostly LaTeX commands or symbols
+		if strings.HasPrefix(trimmed, "\\") || 
+			strings.HasPrefix(trimmed, "{") || 
+			strings.HasPrefix(trimmed, "}") || 
+			strings.HasPrefix(trimmed, "&") ||
+			strings.HasPrefix(trimmed, "$") {
+			continue
+		}
+		
+		// Count lines that look like actual prose text content
+		// Must have multiple words and not be just numbers/symbols
+		wordCount := len(regexp.MustCompile(`[a-zA-Z]{3,}`).FindAllString(trimmed, -1))
+		if wordCount >= 3 {
+			textContentCount++
+		}
+	}
+	
+	// If the file is primarily a table with very little prose, skip translation
+	if hasTableEnv && textContentCount < 5 {
+		return false
+	}
+	
+	// If the file is mostly command definitions with very little text, skip translation
+	totalSignificant := commandDefCount + tableStructureCount + textContentCount
+	if totalSignificant > 0 {
+		nonTextRatio := float64(commandDefCount+tableStructureCount) / float64(totalSignificant)
+		// If more than 80% of significant lines are non-text (commands or table structure), skip translation
+		if nonTextRatio > 0.8 && textContentCount < 5 {
+			return false
+		}
+	}
+	
+	// Also skip if there's very little text content overall
+	if textContentCount < 3 {
+		return false
+	}
+	
+	return true
+}
+
 // findInputFiles finds all tex files referenced by \input or \include commands in the given content.
 // It recursively scans all referenced files to find nested \input commands.
 // It returns a list of relative file paths in the order they should be processed.
+// baseDir should be the directory containing the main tex file (not the extraction root)
 func findInputFiles(content string, baseDir string) []string {
 	seen := make(map[string]bool)
 	var files []string
@@ -3128,15 +3529,26 @@ func (a *App) translateAllTexFiles(mainTexPath string, baseDir string, progressC
 	// Read main tex file
 	mainContent, err := os.ReadFile(mainTexPath)
 	if err != nil {
-		return nil, 0, types.NewAppError(types.ErrFileNotFound, "读取?tex 文件失败", err)
+		return nil, 0, types.NewAppError(types.ErrFileNotFound, "读取主 tex 文件失败", err)
 	}
 
 	// Find all input files
-	inputFiles := findInputFiles(string(mainContent), baseDir)
+	inputFiles := findInputFiles(string(mainContent), filepath.Dir(mainTexPath))
 	logger.Info("found input files", logger.Int("count", len(inputFiles)))
 
+	// Get the relative path of main file from baseDir
+	mainFileRel, err := filepath.Rel(baseDir, mainTexPath)
+	if err != nil {
+		// If we can't get relative path, use the basename
+		mainFileRel = filepath.Base(mainTexPath)
+		logger.Warn("failed to get relative path for main file, using basename",
+			logger.String("mainTexPath", mainTexPath),
+			logger.String("baseDir", baseDir),
+			logger.String("mainFileRel", mainFileRel))
+	}
+
 	// Collect all files to translate (main file + input files)
-	allFiles := []string{filepath.Base(mainTexPath)}
+	allFiles := []string{mainFileRel}
 	allFiles = append(allFiles, inputFiles...)
 
 	totalFiles := len(allFiles)
@@ -3145,7 +3557,19 @@ func (a *App) translateAllTexFiles(mainTexPath string, baseDir string, progressC
 	// Translate each file
 	for _, relPath := range allFiles {
 		currentFile++
-		fullPath := filepath.Join(baseDir, relPath)
+		
+		// Construct full path - handle both relative paths from baseDir and from main file dir
+		var fullPath string
+		if filepath.IsAbs(relPath) {
+			fullPath = relPath
+		} else {
+			// Try relative to baseDir first
+			fullPath = filepath.Join(baseDir, relPath)
+			if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+				// If not found, try relative to main file directory
+				fullPath = filepath.Join(filepath.Dir(mainTexPath), relPath)
+			}
+		}
 
 		logger.Info("processing file for translation",
 			logger.String("relPath", relPath),
@@ -3155,9 +3579,13 @@ func (a *App) translateAllTexFiles(mainTexPath string, baseDir string, progressC
 
 		content, err := os.ReadFile(fullPath)
 		if err != nil {
-			logger.Error("failed to read input file", err, logger.String("file", relPath), logger.String("fullPath", fullPath))
+			logger.Error("failed to read input file", err, 
+				logger.String("file", relPath), 
+				logger.String("fullPath", fullPath),
+				logger.String("baseDir", baseDir),
+				logger.String("mainTexPath", mainTexPath))
 			// Don't skip - return error to fail fast
-			return nil, 0, types.NewAppError(types.ErrFileNotFound, fmt.Sprintf("ȡļʧ: %s", relPath), err)
+			return nil, 0, types.NewAppError(types.ErrFileNotFound, fmt.Sprintf("读取文件失败: %s", relPath), err)
 		}
 
 		// Store original content for reference-based fixes
@@ -3170,6 +3598,13 @@ func (a *App) translateAllTexFiles(mainTexPath string, baseDir string, progressC
 		// Skip empty files
 		if len(strings.TrimSpace(string(content))) == 0 {
 			logger.Debug("skipping empty file", logger.String("file", relPath))
+			results[relPath] = string(content)
+			continue
+		}
+
+		// Skip files that don't need translation (e.g., pure command definition files)
+		if !needsTranslation(string(content)) {
+			logger.Info("skipping file without translatable content", logger.String("file", relPath))
 			results[relPath] = string(content)
 			continue
 		}
@@ -3194,6 +3629,7 @@ func (a *App) translateAllTexFiles(mainTexPath string, baseDir string, progressC
 
 		// Apply reference-based fixes using original content
 		translatedContent := result.TranslatedContent
+		
 		if original, ok := originalContents[relPath]; ok {
 			fixedContent, wasFixed := compiler.QuickFixWithReference(translatedContent, original)
 			if wasFixed {
@@ -3990,6 +4426,201 @@ func (a *App) DownloadGitHubTranslation(arxivID, fileType, saveDir string) (stri
 
 	logger.Info("download completed", logger.String("savePath", savePath))
 	return savePath, nil
+}
+
+// DownloadAndOpenResult represents the result of downloading and opening a paper
+type DownloadAndOpenResult struct {
+	Success       bool   `json:"success"`
+	ChinesePath   string `json:"chinese_path,omitempty"`
+	BilingualPath string `json:"bilingual_path,omitempty"`
+	Message       string `json:"message,omitempty"`
+}
+
+// DownloadAndOpenGitHubTranslation downloads a translation to cache directory and optionally opens it
+// fileType: "bilingual" or "chinese" - determines which file to open in external viewer (if openExternal is true)
+// openExternal: if true, opens the file in external viewer; if false, only downloads and returns paths
+func (a *App) DownloadAndOpenGitHubTranslation(arxivID, fileType string, openExternal bool) (*DownloadAndOpenResult, error) {
+	logger.Info("downloading and opening GitHub translation",
+		logger.String("arxivID", arxivID),
+		logger.String("fileType", fileType),
+		logger.Bool("openExternal", openExternal))
+
+	// Normalize arXiv ID
+	arxivID = strings.TrimPrefix(strings.ToLower(arxivID), "arxiv:")
+	arxivID = strings.TrimSpace(arxivID)
+
+	// Get cache directory
+	cacheDir, err := a.getCacheDir()
+	if err != nil {
+		return nil, types.NewAppError(types.ErrInternal, "获取缓存目录失败: "+err.Error(), err)
+	}
+
+	// Create subdirectory for this paper
+	paperCacheDir := filepath.Join(cacheDir, "github_papers", arxivID)
+	if err := os.MkdirAll(paperCacheDir, 0755); err != nil {
+		return nil, types.NewAppError(types.ErrInternal, "创建缓存目录失败: "+err.Error(), err)
+	}
+
+	// Get GitHub token for authenticated requests
+	githubToken := ""
+	if a.config != nil {
+		cfg := a.config.GetConfig()
+		githubToken = cfg.GitHubToken
+	}
+
+	// Search for the translation first
+	uploader := github.NewUploader(githubToken, DefaultGitHubOwner, DefaultGitHubRepo)
+	searchResult, err := uploader.SearchTranslation(arxivID)
+	if err != nil {
+		return nil, types.NewAppError(types.ErrAPICall, "搜索失败: "+err.Error(), err)
+	}
+
+	if !searchResult.Found {
+		return nil, types.NewAppError(types.ErrFileNotFound, "GitHub 上未找到该论文的翻译", nil)
+	}
+
+	result := &DownloadAndOpenResult{Success: true}
+	var fileToOpen string
+
+	// Download both bilingual and chinese PDFs if available
+	// This allows the viewer to display both files
+	
+	// Download bilingual PDF if available
+	if searchResult.DownloadURLBi != "" && searchResult.BilingualPDFFilename != "" {
+		bilingualPath := filepath.Join(paperCacheDir, searchResult.BilingualPDFFilename)
+		
+		// Check if file already exists
+		if _, err := os.Stat(bilingualPath); err == nil {
+			// File exists, skip download
+			result.BilingualPath = bilingualPath
+			logger.Info("bilingual PDF already exists in cache", logger.String("path", bilingualPath))
+			
+			// If user requested bilingual, this is the file to open
+			if fileType == "bilingual" {
+				fileToOpen = bilingualPath
+			}
+		} else {
+			// File doesn't exist, download it
+			// Update status
+			a.updateStatus(types.PhaseDownloading, 20, "正在下载双语 PDF...")
+			
+			// Download
+			if err := uploader.DownloadFile(searchResult.DownloadURLBi, bilingualPath); err != nil {
+				logger.Error("download bilingual PDF failed", err, logger.String("url", searchResult.DownloadURLBi))
+			} else {
+				result.BilingualPath = bilingualPath
+				logger.Info("downloaded bilingual PDF", logger.String("path", bilingualPath))
+				
+				// If user requested bilingual, this is the file to open
+				if fileType == "bilingual" {
+					fileToOpen = bilingualPath
+				}
+			}
+		}
+	}
+
+	// Download chinese PDF if available
+	if searchResult.DownloadURLCN != "" && searchResult.ChinesePDFFilename != "" {
+		chinesePath := filepath.Join(paperCacheDir, searchResult.ChinesePDFFilename)
+		
+		// Check if file already exists
+		if _, err := os.Stat(chinesePath); err == nil {
+			// File exists, skip download
+			result.ChinesePath = chinesePath
+			logger.Info("chinese PDF already exists in cache", logger.String("path", chinesePath))
+			
+			// If user requested chinese, this is the file to open
+			if fileType == "chinese" {
+				fileToOpen = chinesePath
+			}
+		} else {
+			// File doesn't exist, download it
+			// Update status
+			a.updateStatus(types.PhaseDownloading, 50, "正在下载中文 PDF...")
+			
+			// Download
+			if err := uploader.DownloadFile(searchResult.DownloadURLCN, chinesePath); err != nil {
+				logger.Error("download chinese PDF failed", err, logger.String("url", searchResult.DownloadURLCN))
+			} else {
+				result.ChinesePath = chinesePath
+				logger.Info("downloaded chinese PDF", logger.String("path", chinesePath))
+				
+				// If user requested chinese, this is the file to open
+				if fileType == "chinese" {
+					fileToOpen = chinesePath
+				}
+			}
+		}
+	}
+
+	// If no file was downloaded, return error
+	if result.BilingualPath == "" && result.ChinesePath == "" {
+		return nil, types.NewAppError(types.ErrFileNotFound, "未找到可下载的 PDF 文件", nil)
+	}
+
+	// Determine which file to open in external viewer
+	// Priority: requested file type, then bilingual, then chinese
+	if fileToOpen == "" {
+		if result.BilingualPath != "" {
+			fileToOpen = result.BilingualPath
+		} else if result.ChinesePath != "" {
+			fileToOpen = result.ChinesePath
+		}
+	}
+
+	// Update status
+	a.updateStatus(types.PhaseDownloading, 80, "正在打开文件...")
+
+	// Open the file with system default application (only if openExternal is true)
+	if openExternal && fileToOpen != "" {
+		logger.Info("opening file in external viewer", logger.String("path", fileToOpen))
+		if err := a.openFileWithDefaultApp(fileToOpen); err != nil {
+			logger.Warn("failed to open file", logger.Err(err))
+			result.Message = "文件已下载，但无法自动打开"
+		} else {
+			result.Message = "文件已下载并打开"
+		}
+	} else {
+		result.Message = "文件已下载"
+	}
+
+	// Reset status
+	a.updateStatus(types.PhaseIdle, 0, "")
+
+	logger.Info("download and open completed",
+		logger.String("bilingualPath", result.BilingualPath),
+		logger.String("chinesePath", result.ChinesePath))
+	return result, nil
+}
+
+// getCacheDir returns the cache directory path
+func (a *App) getCacheDir() (string, error) {
+	// Use user's cache directory
+	userCacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+
+	cacheDir := filepath.Join(userCacheDir, "latex-translator")
+	return cacheDir, nil
+}
+
+// openFileWithDefaultApp opens a file with the system's default application
+func (a *App) openFileWithDefaultApp(filePath string) error {
+	var cmd *exec.Cmd
+
+	switch goruntime.GOOS {
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", "", filePath)
+	case "darwin":
+		cmd = exec.Command("open", filePath)
+	case "linux":
+		cmd = exec.Command("xdg-open", filePath)
+	default:
+		return fmt.Errorf("unsupported operating system: %s", goruntime.GOOS)
+	}
+
+	return cmd.Start()
 }
 
 // ArxivPaperMetadata represents metadata for an arXiv paper

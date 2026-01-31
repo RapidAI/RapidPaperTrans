@@ -167,9 +167,8 @@ func (b *BatchTranslator) GetConcurrency() int {
 
 // ChatCompletionRequest represents the request body for OpenAI chat completions API.
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
 }
 
 // Message represents a message in the chat completion request.
@@ -365,7 +364,6 @@ func (b *BatchTranslator) callOpenAIAPI(batchText string) (string, error) {
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Temperature: 0.3, // Lower temperature for more consistent translations
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -425,14 +423,6 @@ func (b *BatchTranslator) callOpenAIAPI(batchText string) (string, error) {
 	return chatResp.Choices[0].Message.Content, nil
 }
 
-// min returns the smaller of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // normalizeAPIURL ensures the API URL ends with /chat/completions
 func (b *BatchTranslator) normalizeAPIURL(url string) string {
 	if url == "" {
@@ -458,18 +448,26 @@ Your task is to translate text extracted from PDF documents from English to Chin
 
 CRITICAL RULES:
 1. Translate the text content from English to Chinese accurately.
-2. Preserve any mathematical formulas, symbols, or special characters exactly as they are.
+2. PRESERVE ALL MATHEMATICAL EXPRESSIONS EXACTLY AS THEY ARE:
+   - Inline formulas like: x², y₁, α, β, γ, θ, ∑, ∫, ∞, ≤, ≥, ≠, →, ∈, ⊂
+   - Variable names: x, y, z, n, m, k, i, j
+   - Mathematical notation: f(x), P(A|B), E[X], O(n), log(n)
+   - Subscripts and superscripts: x_i, x^2, a_n
+   - Greek letters: α, β, γ, δ, ε, θ, λ, μ, σ, π, ω
+   - Operators: +, -, ×, ÷, =, <, >, ≤, ≥
 3. Maintain proper Chinese punctuation (use Chinese quotation marks, periods, etc.).
 4. Do not add any explanations or notes - output only the translated text.
 5. IMPORTANT: The input may contain multiple text blocks separated by "` + BatchSeparator + `".
 6. You MUST preserve these separators in your output exactly as they appear.
 7. Each block should be translated independently but the separators must remain intact.
-8. Do not merge blocks or remove separators.`
+8. Do not merge blocks or remove separators.
+9. Keep technical terms, proper nouns, and abbreviations in English when appropriate.`
 }
 
 // buildUserPrompt creates the user prompt with the content to translate
 func (b *BatchTranslator) buildUserPrompt(batchText string) string {
-	return fmt.Sprintf(`Translate the following text from English to Chinese. 
+	return fmt.Sprintf(`Translate the following text from English to Chinese.
+IMPORTANT: Keep all mathematical symbols, formulas, variable names, and Greek letters unchanged.
 If there are multiple blocks separated by "%s", translate each block separately and keep the separators in your output.
 
 %s`, BatchSeparator, batchText)

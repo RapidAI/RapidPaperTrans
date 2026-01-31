@@ -197,10 +197,23 @@ def translate_pdf(input_pdf, cache_path, output_pdf):
     
     print(f"\n总共翻译了 {translated_count} 行")
     
+    # 验证页数
+    original_page_count = len(doc)
+    
     doc.subset_fonts()
     doc.ez_save(output_pdf)
     print(f"已保存到: {output_pdf}")
     doc.close()
+    
+    # 重新打开验证页数
+    doc_check = pymupdf.open(output_pdf)
+    output_page_count = len(doc_check)
+    doc_check.close()
+    
+    if original_page_count != output_page_count:
+        print(f"警告: 页数不一致! 原始: {original_page_count}, 输出: {output_page_count}")
+    else:
+        print(f"页数验证通过: {output_page_count} 页")
 
 
 def main():

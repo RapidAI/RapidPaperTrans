@@ -149,6 +149,168 @@
             color: #a0aec0;
         }
 
+        /* Input with History Dropdown */
+        .input-with-history {
+            flex: 1;
+            min-width: 300px;
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .input-with-history input[type="text"] {
+            flex: 1;
+            padding: 10px 40px 10px 15px;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            font-size: 14px;
+            background: #fafcfd;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .input-with-history input[type="text"]:focus {
+            outline: none;
+            border-color: #7eb8c9;
+            box-shadow: 0 0 0 3px rgba(126, 184, 201, 0.15);
+            background: #ffffff;
+        }
+
+        .btn-history {
+            position: absolute;
+            right: 8px;
+            background: none;
+            border: none;
+            font-size: 16px;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0.6;
+            transition: all 0.2s;
+        }
+
+        .btn-history:hover {
+            opacity: 1;
+            background: rgba(126, 184, 201, 0.15);
+        }
+
+        .history-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #ffffff;
+            border: 1px solid #d1dce5;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            z-index: 100;
+            margin-top: 4px;
+            max-height: 300px;
+            overflow: hidden;
+        }
+
+        .history-dropdown.show {
+            display: block;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 15px;
+            border-bottom: 1px solid #e8eff3;
+            background: #fafcfd;
+            font-size: 13px;
+            font-weight: 500;
+            color: #5a7080;
+        }
+
+        .btn-clear-history {
+            background: none;
+            border: none;
+            font-size: 14px;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            opacity: 0.6;
+            transition: all 0.2s;
+        }
+
+        .btn-clear-history:hover {
+            opacity: 1;
+            background: #fef5f5;
+        }
+
+        .history-list {
+            max-height: 240px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 10px 15px;
+            cursor: pointer;
+            transition: background 0.2s;
+            border-bottom: 1px solid #f0f5f7;
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .history-item:hover {
+            background: #f5f9fb;
+        }
+
+        .history-text {
+            flex: 1;
+            font-size: 14px;
+            color: #3d5a6c;
+            font-family: monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: pointer;
+        }
+
+        .btn-remove-history {
+            background: none;
+            border: none;
+            font-size: 18px;
+            line-height: 1;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 4px;
+            opacity: 0;
+            transition: all 0.2s;
+            color: #e57373;
+            flex-shrink: 0;
+        }
+
+        .history-item:hover .btn-remove-history {
+            opacity: 0.6;
+        }
+
+        .btn-remove-history:hover {
+            opacity: 1 !important;
+            background: #fef5f5;
+        }
+
+        .history-empty {
+            display: none;
+            padding: 20px;
+            text-align: center;
+            color: #a0b0bc;
+            font-size: 13px;
+        }
+
+        .history-empty.show {
+            display: block;
+        }
+
         .btn {
             padding: 10px 20px;
             border: none;
@@ -2196,7 +2358,7 @@
                 <button class="mode-tab active" id="mode-tab-latex" data-mode="latex">
                     <span class="tab-icon">📄</span>arXiv论文翻译
                 </button>
-                <button class="mode-tab" id="mode-tab-pdf" data-mode="pdf" style="display: none;">
+                <button class="mode-tab" id="mode-tab-pdf" data-mode="pdf">
                     <span class="tab-icon">📑</span>PDF 翻译
                 </button>
             </div>
@@ -2204,8 +2366,21 @@
 
         <!-- LaTeX Input Section (existing, shown by default) -->
         <section class="input-section" id="latex-input-section">
-            <input type="text" id="input-source" placeholder="输入 arXiv URL、arXiv ID（如 2301.00001）或本地 zip 文件路径..."
-                autocomplete="off" />
+            <div class="input-with-history">
+                <input type="text" id="input-source" placeholder="输入 arXiv URL、arXiv ID（如 2301.00001）或本地 zip 文件路径..."
+                    autocomplete="off" />
+                <button class="btn-history" id="btn-history" title="历史记录">🕐</button>
+                <div class="history-dropdown" id="history-dropdown">
+                    <div class="history-header">
+                        <span>历史记录</span>
+                        <button class="btn-clear-history" id="btn-clear-history" title="清空历史">🗑️</button>
+                    </div>
+                    <div class="history-list" id="history-list">
+                        <!-- History items will be added dynamically -->
+                    </div>
+                    <div class="history-empty" id="history-empty">暂无历史记录</div>
+                </div>
+            </div>
             <button class="btn btn-secondary" id="btn-browse">📁 浏览</button>
             <button class="btn btn-primary" id="btn-process">🚀 开始处理</button>
             <button class="btn btn-secondary" id="btn-cancel" style="display: none;">❌ 取消</button>
@@ -2220,7 +2395,7 @@
         </section>
 
         <!-- PDF Input Section (for PDF mode, hidden by default) -->
-        <section class="pdf-input-section" id="pdf-input-section" style="display: none;">
+        <section class="pdf-input-section" id="pdf-input-section">
             <div class="pdf-drop-zone" id="pdf-drop-zone">
                 <div class="drop-icon">📄</div>
                 <div class="drop-text">拖拽 PDF 文件到此处</div>

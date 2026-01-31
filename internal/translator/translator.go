@@ -153,7 +153,6 @@ func (t *TranslationEngine) TestConnection() error {
 		Messages: []Message{
 			{Role: "user", Content: "Reply with only the word 'ok', nothing else."},
 		},
-		Temperature: 0,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -260,8 +259,23 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 		}, nil
 	}
 
+	// Note: Caption pre-translation is disabled for now because it may cause issues
+	// with the main translation flow. The table/figure environments are protected
+	// in protectedEnvNames, so their structure will be preserved.
+	// TODO: Re-enable caption translation after fixing the issues
+	contentWithTranslatedCaptions := content
+
+	// Note: Preprocessing (comment removal) is disabled for now because:
+	// 1. Some documents have intentionally commented-out code that affects structure
+	// 2. Removing comments can change the document structure unexpectedly
+	// 3. The post-processor can handle most issues without preprocessing
+	// 
+	// To enable preprocessing in the future, uncomment the following:
+	// preprocessedContent := PreprocessLaTeX(content, DefaultPreprocessOptions())
+	// and use preprocessedContent instead of content for splitting
+
 	// Split content into chunks for translation
-	chunks := splitIntoChunks(content, MaxChunkSize)
+	chunks := splitIntoChunks(contentWithTranslatedCaptions, MaxChunkSize)
 	totalChunks := len(chunks)
 	logger.Info("content split into chunks", logger.Int("chunkCount", totalChunks))
 
@@ -289,7 +303,21 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 			logger.Debug("translating chunk", logger.Int("chunkIndex", chunkNum), logger.Int("totalChunks", totalChunks))
 
 			translated, tokens, err := t.translateChunkWithRetry(chunkContent)
-			
+
+			// Post-process each chunk immediately after translation
+			// Compare with original chunk to fix format issues
+			if err == nil && translated != "" {
+				beforeLen := len(translated)
+				translated = PostprocessChunk(translated, chunkContent)
+				afterLen := len(translated)
+				if beforeLen != afterLen {
+					logger.Info("postprocessor changed chunk",
+						logger.Int("chunkIndex", chunkNum),
+						logger.Int("beforeLen", beforeLen),
+						logger.Int("afterLen", afterLen))
+				}
+			}
+
 			mu.Lock()
 			translatedChunks[idx] = translated
 			tokenCounts[idx] = tokens
@@ -341,6 +369,7 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 	// Join translated chunks back together
 	translatedContent := strings.Join(translatedChunks, "")
 
+	// Final fixes on the complete translated content
 	// Fix LaTeX line structure issues caused by LLM merging lines
 	translatedContent = FixLaTeXLineStructure(translatedContent)
 
@@ -348,7 +377,35 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 	// This compares the translated content with the original to fix structural issues
 	translatedContent = ApplyReferenceBasedFixes(translatedContent, content)
 
-	logger.Info("translation completed successfully", logger.Int("totalTokens", totalTokens))
+	// Validate the translation result to detect anomalies
+	validator := NewTranslationValidator()
+	validationResult := validator.ValidateTranslation(content, translatedContent)
+	
+	if !validationResult.IsValid {
+		errorMsg := FormatValidationErrors(validationResult)
+		logger.Error("translation validation failed", nil,
+			logger.Int("originalLength", validationResult.OriginalLength),
+			logger.Int("translatedLength", validationResult.TranslatedLength),
+			logger.Int("chineseCharCount", validationResult.ChineseCharCount),
+			logger.Float64("lengthRatio", validationResult.LengthRatio))
+		
+		return nil, types.NewAppErrorWithDetails(
+			types.ErrTranslation,
+			"翻译结果验证失败",
+			errorMsg,
+			nil,
+		)
+	}
+
+	// Log warnings if any
+	for _, warning := range validationResult.Warnings {
+		logger.Warn("translation validation warning", logger.String("warning", warning))
+	}
+
+	logger.Info("translation completed successfully", 
+		logger.Int("totalTokens", totalTokens),
+		logger.Int("chineseCharCount", validationResult.ChineseCharCount),
+		logger.Float64("lengthRatio", validationResult.LengthRatio))
 	return &types.TranslationResult{
 		OriginalContent:   content,
 		TranslatedContent: translatedContent,
@@ -412,10 +469,9 @@ func (t *TranslationEngine) translateChunkWithRetry(chunk string) (string, int, 
 
 // ChatCompletionRequest represents the request body for OpenAI chat completions API.
 type ChatCompletionRequest struct {
-	Model       string    `json:"model"`
-	Messages    []Message `json:"messages"`
-	Temperature float64   `json:"temperature"`
-	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Model     string    `json:"model"`
+	Messages  []Message `json:"messages"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
 }
 
 // Message represents a message in the chat completion request.
@@ -478,11 +534,11 @@ func (t *TranslationEngine) doTranslateChunk(chunk string) (string, int, error) 
 	// So output tokens ≈ input_chars / 4 * 2 = input_chars / 2
 	// Add 50% buffer for safety
 	estimatedOutputTokens := len(chunk) / 2 * 3 / 2 // input_chars / 2 * 1.5
-	if estimatedOutputTokens < 4096 {
-		estimatedOutputTokens = 4096 // Minimum 4096 tokens
+	if estimatedOutputTokens < 512 {
+		estimatedOutputTokens = 512 // Minimum 512 tokens
 	}
-	if estimatedOutputTokens > 16384 {
-		estimatedOutputTokens = 16384 // Cap at 16384 to avoid model limits
+	if estimatedOutputTokens > 8192 {
+		estimatedOutputTokens = 8192 // Cap at 8192 to avoid API limits
 	}
 	
 	reqBody := ChatCompletionRequest{
@@ -491,8 +547,7 @@ func (t *TranslationEngine) doTranslateChunk(chunk string) (string, int, error) 
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: userPrompt},
 		},
-		Temperature: 0.3, // Lower temperature for more consistent translations
-		MaxTokens:   estimatedOutputTokens,
+		MaxTokens: estimatedOutputTokens,
 	}
 
 	jsonBody, err := json.Marshal(reqBody)
@@ -560,9 +615,11 @@ func (t *TranslationEngine) doTranslateChunk(chunk string) (string, int, error) 
 	finishReason := chatResp.Choices[0].FinishReason
 	if finishReason == "length" {
 		logger.Warn("translation output was truncated due to length limit",
-			logger.Int("completionTokens", chatResp.Usage.CompletionTokens))
-		// Return the truncated content but log a warning
-		// The caller should handle this appropriately
+			logger.Int("completionTokens", chatResp.Usage.CompletionTokens),
+			logger.Int("inputLength", len(chunk)))
+		// Continue with truncated content but log warning
+		// The content may be incomplete, but we'll try to use what we have
+		// Consider reducing MaxChunkSize if this happens frequently
 	}
 
 	translatedContent := chatResp.Choices[0].Message.Content
@@ -649,11 +706,12 @@ CRITICAL RULES:
    - All mathematical formulas and symbols inside math environments
    - Comments starting with %
    - Package imports and document class declarations
-3. Keep the document structure and formatting intact.
-4. Maintain proper Chinese punctuation (use Chinese quotation marks, periods, etc.).
-5. Do not add any explanations or notes - output only the translated LaTeX content.
+3. TRANSLATE comments: For lines starting with %, translate the text after % to Chinese, but keep the % symbol and line structure.
+4. Keep the document structure and formatting intact.
+5. Maintain proper Chinese punctuation (use Chinese quotation marks, periods, etc.).
+6. Do not add any explanations or notes - output only the translated LaTeX content.
 CRITICAL LINE STRUCTURE RULES (MUST FOLLOW):
-6. PRESERVE THE EXACT LINE STRUCTURE of the original document:
+7. PRESERVE THE EXACT LINE STRUCTURE of the original document:
    - Each \item MUST remain on its own separate line
    - Each \begin{...} MUST remain on its own separate line
    - Each \end{...} MUST remain on its own separate line
@@ -661,7 +719,7 @@ CRITICAL LINE STRUCTURE RULES (MUST FOLLOW):
    - NEVER put \end{itemize} and \item on the same line
    - NEVER put \end{enumerate} and \item on the same line
    - The output MUST have approximately the same number of lines as the input
-7. For list environments (itemize, enumerate, description):
+8. For list environments (itemize, enumerate, description):
    - Keep each \item on a separate line
    - Keep \begin{itemize/enumerate} on its own line
    - Keep \end{itemize/enumerate} on its own line
@@ -685,43 +743,80 @@ LaTeX content to translate:
 // buildSystemPromptWithProtection creates the system prompt for protected translation.
 // This prompt is used when LaTeX commands have been replaced with placeholders.
 func buildSystemPromptWithProtection() string {
-	return `You are a precise academic translator. Your ONLY task is to translate English text to Chinese.
+	return `You are a STRICT LaTeX document translator. You translate English to Chinese while preserving EXACT document structure.
 
-## ABSOLUTE RULES (VIOLATION = FAILURE):
+## CRITICAL CONTEXT
+- This input is a FRAGMENT of a larger LaTeX document, NOT a complete document
+- You may see \begin{...} without matching \end{...} - THIS IS NORMAL
+- You may see \end{...} without matching \begin{...} - THIS IS NORMAL
+- You may see incomplete tables, figures, or environments - THIS IS NORMAL
+- DO NOT try to "fix" or "complete" anything - just translate the text
 
-### Rule 1: PLACEHOLDER PRESERVATION (MOST CRITICAL)
+## YOUR ROLE: FAITHFUL TRANSLATOR
+- You are a translation tool, NOT an editor or improver
+- Your output must be a MIRROR of the input structure with only text translated
+- NEVER add, remove, or modify anything except translating English text to Chinese
+
+## ABSOLUTE RULES (VIOLATION = CRITICAL FAILURE):
+
+### Rule 1: COMMENT PRESERVATION (MOST CRITICAL)
+- Lines starting with % are COMMENTS - they MUST stay as comments
+- Lines NOT starting with % are CODE - they MUST stay as code
+- NEVER add % to any line that doesn't have it in the input
+- NEVER remove % from any line that has it in the input
+- This rule has NO exceptions - even if the code looks "wrong" or "incomplete"
+
+### Rule 2: PLACEHOLDER PRESERVATION (CRITICAL)
 - Placeholders look like: <<<LATEX_CMD_0>>>, <<<LATEX_CMD_1>>>, etc.
-- You MUST copy each placeholder EXACTLY as it appears - character by character
+- Copy each placeholder EXACTLY - character by character, position by position
 - NEVER modify, translate, explain, or interpret placeholders
-- NEVER change the number in a placeholder (e.g., <<<LATEX_CMD_0>>> must stay as <<<LATEX_CMD_0>>>)
+- NEVER change the number in a placeholder
 - NEVER add spaces inside placeholders
 - NEVER split a placeholder across lines
-- If input has <<<LATEX_CMD_5>>>, output MUST have <<<LATEX_CMD_5>>> (identical)
 
-### Rule 2: NO HALLUCINATION
-- Translate ONLY what is given - do not add information
-- Do not add explanations, notes, or comments
-- Do not add content that wasn't in the original
-- Do not "improve" or "clarify" the text
-- If something is unclear, translate it literally
+### Rule 3: STRUCTURE PRESERVATION (CRITICAL)
+- Output MUST have EXACTLY the same number of lines as input
+- Each line in output corresponds to the same line in input
+- If input line N has a placeholder, output line N must have that SAME placeholder
+- If input line starts with %, output line must start with %
+- If input line is empty, output line must be empty
+- NEVER merge multiple input lines into one output line
+- NEVER split one input line into multiple output lines
+- NEVER add new lines that don't exist in input
+- NEVER remove lines that exist in input
 
-### Rule 3: STRUCTURE PRESERVATION
-- Keep the same number of lines as input
-- Keep placeholders on their original lines
-- Do not merge lines
-- Do not split lines
-- Preserve paragraph breaks
+### Rule 4: NO ADDITIONS OR MODIFICATIONS
+- Do NOT add \end{document}, \end{table}, \end{tabular} or any LaTeX commands
+- Do NOT add comments (% lines) that don't exist in input
+- Do NOT remove comments that exist in input
+- Do NOT add explanations, notes, or annotations
+- Do NOT "fix", "complete", or "improve" anything
+- Do NOT add content that wasn't in the original
+- Even if you see \begin{table} without \end{table}, DO NOT add \end{table}
+- Translate ONLY the English text, leave everything else UNCHANGED
 
-### Rule 4: OUTPUT FORMAT
+### Rule 5: OUTPUT FORMAT
 - Output ONLY the translated text
 - No JSON, no code blocks, no markdown formatting
 - No "Translation:" prefix or similar labels
 - Start directly with the translated content
+- End exactly where the input ends
 
 ## TRANSLATION GUIDELINES:
 - Use proper Chinese punctuation: 。，、；：""''（）
 - Maintain academic/formal tone
-- Preserve technical terms when appropriate`
+- Preserve technical terms when appropriate
+
+## EXAMPLE:
+Input (3 lines):
+The quick brown fox
+<<<LATEX_CMD_0>>>
+jumps over the lazy dog.
+
+Output (MUST be exactly 3 lines):
+敏捷的棕色狐狸
+<<<LATEX_CMD_0>>>
+跳过了懒狗。`
 }
 
 // buildUserPromptWithProtection creates the user prompt for protected translation.
@@ -827,41 +922,172 @@ func isRetryableAPIError(err error) bool {
 }
 
 
+// =============================================================================
+// LaTeX-Aware Chunking
+// =============================================================================
+// The following functions implement intelligent chunking that respects LaTeX
+// environment boundaries to prevent splitting tables, figures, and other
+// environments across chunks.
+// =============================================================================
+
+// environmentBoundary represents a LaTeX environment boundary
+type environmentBoundary struct {
+	envName string
+	start   int // position of \begin{...}
+	end     int // position after \end{...}
+}
+
+// findEnvironmentBoundaries finds all complete LaTeX environments in the content
+func findEnvironmentBoundaries(content string) []environmentBoundary {
+	var boundaries []environmentBoundary
+
+	// Environments that should be kept together
+	protectedEnvs := []string{
+		"table", "table*", "tabular", "tabular*", "tabularx",
+		"figure", "figure*",
+		"equation", "equation*", "align", "align*", "gather", "gather*",
+		"tikzpicture", "algorithm", "algorithmic",
+		"lstlisting", "verbatim", "minted",
+		"itemize", "enumerate", "description",
+		"theorem", "lemma", "proof", "definition", "corollary",
+		"abstract", "quote", "quotation",
+	}
+
+	for _, envName := range protectedEnvs {
+		beginTag := `\begin{` + envName + `}`
+
+		startIdx := 0
+		for {
+			beginPos := strings.Index(content[startIdx:], beginTag)
+			if beginPos == -1 {
+				break
+			}
+			beginPos += startIdx
+
+			// Find matching end tag (handle nesting)
+			endPos := findMatchingEnd(content, beginPos, envName)
+			if endPos == -1 {
+				startIdx = beginPos + len(beginTag)
+				continue
+			}
+
+			boundaries = append(boundaries, environmentBoundary{
+				envName: envName,
+				start:   beginPos,
+				end:     endPos,
+			})
+
+			startIdx = endPos
+		}
+	}
+
+	// Sort by start position
+	sort.Slice(boundaries, func(i, j int) bool {
+		return boundaries[i].start < boundaries[j].start
+	})
+
+	return boundaries
+}
+
+// findMatchingEnd finds the matching \end{envName} for a \begin{envName}
+func findMatchingEnd(content string, beginPos int, envName string) int {
+	beginTag := `\begin{` + envName + `}`
+	endTag := `\end{` + envName + `}`
+
+	depth := 1
+	searchPos := beginPos + len(beginTag)
+
+	for depth > 0 && searchPos < len(content) {
+		nextBegin := strings.Index(content[searchPos:], beginTag)
+		nextEnd := strings.Index(content[searchPos:], endTag)
+
+		if nextEnd == -1 {
+			return -1 // No matching end found
+		}
+
+		if nextBegin != -1 && nextBegin < nextEnd {
+			depth++
+			searchPos += nextBegin + len(beginTag)
+		} else {
+			depth--
+			if depth == 0 {
+				return searchPos + nextEnd + len(endTag)
+			}
+			searchPos += nextEnd + len(endTag)
+		}
+	}
+
+	return -1
+}
+
+// isInsideEnvironment checks if a position is inside any protected environment
+func isInsideEnvironment(pos int, boundaries []environmentBoundary) bool {
+	for _, b := range boundaries {
+		if pos >= b.start && pos < b.end {
+			return true
+		}
+	}
+	return false
+}
+
+// findSafeBreakPoint finds a break point that doesn't split any environment
+func findSafeBreakPoint(content string, targetPos int, boundaries []environmentBoundary) int {
+	// If target position is not inside any environment, it's safe
+	if !isInsideEnvironment(targetPos, boundaries) {
+		return targetPos
+	}
+
+	// Find the environment we're inside and return its end position
+	for _, b := range boundaries {
+		if targetPos >= b.start && targetPos < b.end {
+			// We're inside this environment, need to include the whole thing
+			// But if the environment is too large, we need to break before it
+			return b.start
+		}
+	}
+
+	return targetPos
+}
+
 // splitIntoChunks splits content into chunks suitable for translation.
 // It tries to split at natural boundaries (paragraphs, sections) to maintain context.
 // Each chunk will be at most maxSize characters.
 //
 // The function uses the following strategy:
-// 1. First, try to split by LaTeX section commands (\section, \subsection, etc.)
-// 2. If sections are too large, split by paragraphs (double newlines)
-// 3. If paragraphs are too large, split by sentences
-// 4. As a last resort, split by character count
+// 1. First, identify all LaTeX environments that should not be split
+// 2. Try to split by LaTeX section commands (\section, \subsection, etc.)
+// 3. If sections are too large, split by paragraphs (double newlines)
+// 4. Ensure no split occurs inside a protected environment
+// 5. As a last resort, split by character count at safe positions
 func splitIntoChunks(content string, maxSize int) []string {
 	if len(content) <= maxSize {
 		return []string{content}
 	}
 
-	// Try to split by sections first
-	chunks := splitBySections(content, maxSize)
+	// Find all environment boundaries first
+	boundaries := findEnvironmentBoundaries(content)
+
+	// Try to split by sections first, respecting environment boundaries
+	chunks := splitBySectionsWithEnvProtection(content, maxSize, boundaries)
 	if len(chunks) > 1 {
 		return chunks
 	}
 
-	// Fall back to splitting by paragraphs
-	chunks = splitByParagraphs(content, maxSize)
+	// Fall back to splitting by paragraphs, respecting environment boundaries
+	chunks = splitByParagraphsWithEnvProtection(content, maxSize, boundaries)
 	if len(chunks) > 1 {
 		return chunks
 	}
 
-	// Fall back to splitting by size with sentence boundaries
-	return splitBySize(content, maxSize)
+	// Fall back to splitting by size with environment protection
+	return splitBySizeWithEnvProtection(content, maxSize, boundaries)
 }
 
 // sectionPattern matches LaTeX section commands
 var sectionPattern = regexp.MustCompile(`(?m)^\\(section|subsection|subsubsection|chapter|part)\s*[\[{]`)
 
-// splitBySections splits content by LaTeX section commands.
-func splitBySections(content string, maxSize int) []string {
+// splitBySectionsWithEnvProtection splits content by LaTeX section commands while protecting environments.
+func splitBySectionsWithEnvProtection(content string, maxSize int, boundaries []environmentBoundary) []string {
 	// Find all section command positions
 	matches := sectionPattern.FindAllStringIndex(content, -1)
 	if len(matches) < 2 {
@@ -874,6 +1100,11 @@ func splitBySections(content string, maxSize int) []string {
 
 	for _, match := range matches {
 		sectionStart := match[0]
+
+		// Skip if this section start is inside a protected environment
+		if isInsideEnvironment(sectionStart, boundaries) {
+			continue
+		}
 
 		// Get content before this section
 		beforeSection := content[lastEnd:sectionStart]
@@ -905,7 +1136,9 @@ func splitBySections(content string, maxSize int) []string {
 	var result []string
 	for _, chunk := range chunks {
 		if len(chunk) > maxSize {
-			result = append(result, splitByParagraphs(chunk, maxSize)...)
+			// Re-find boundaries for this chunk
+			chunkBoundaries := findEnvironmentBoundaries(chunk)
+			result = append(result, splitByParagraphsWithEnvProtection(chunk, maxSize, chunkBoundaries)...)
 		} else {
 			result = append(result, chunk)
 		}
@@ -914,65 +1147,77 @@ func splitBySections(content string, maxSize int) []string {
 	return result
 }
 
-// splitByParagraphs splits content by paragraph boundaries (double newlines).
-func splitByParagraphs(content string, maxSize int) []string {
-	// Split by double newlines (paragraph boundaries)
-	paragraphs := regexp.MustCompile(`\n\s*\n`).Split(content, -1)
+// splitByParagraphsWithEnvProtection splits content by paragraph boundaries while protecting environments.
+func splitByParagraphsWithEnvProtection(content string, maxSize int, boundaries []environmentBoundary) []string {
+	// Find paragraph boundaries (double newlines)
+	paragraphPattern := regexp.MustCompile(`\n\s*\n`)
+	paragraphMatches := paragraphPattern.FindAllStringIndex(content, -1)
 
-	if len(paragraphs) < 2 {
-		return splitBySize(content, maxSize)
+	if len(paragraphMatches) < 1 {
+		return splitBySizeWithEnvProtection(content, maxSize, boundaries)
 	}
 
 	var chunks []string
 	var currentChunk strings.Builder
+	lastEnd := 0
 
-	for i, para := range paragraphs {
-		// Add paragraph separator back (except for first paragraph)
-		if i > 0 {
-			para = "\n\n" + para
+	for _, match := range paragraphMatches {
+		paragraphEnd := match[1]
+
+		// Skip if this break point is inside a protected environment
+		if isInsideEnvironment(match[0], boundaries) {
+			continue
 		}
 
-		// Check if adding this paragraph would exceed maxSize
-		if currentChunk.Len()+len(para) > maxSize {
-			if currentChunk.Len() > 0 {
-				chunks = append(chunks, currentChunk.String())
-				currentChunk.Reset()
-			}
+		// Get content up to this paragraph break
+		segment := content[lastEnd:paragraphEnd]
 
-			// If single paragraph is too large, split it further
-			if len(para) > maxSize {
-				subChunks := splitBySize(para, maxSize)
-				// Add all but the last sub-chunk to results
-				for j, subChunk := range subChunks {
-					if j < len(subChunks)-1 {
-						chunks = append(chunks, subChunk)
-					} else {
-						currentChunk.WriteString(subChunk)
-					}
-				}
-			} else {
-				currentChunk.WriteString(para)
-			}
-		} else {
-			currentChunk.WriteString(para)
+		// Check if adding this content would exceed maxSize
+		if currentChunk.Len()+len(segment) > maxSize && currentChunk.Len() > 0 {
+			// Save current chunk and start a new one
+			chunks = append(chunks, currentChunk.String())
+			currentChunk.Reset()
 		}
+
+		currentChunk.WriteString(segment)
+		lastEnd = paragraphEnd
 	}
+
+	// Add remaining content
+	remaining := content[lastEnd:]
+	if currentChunk.Len()+len(remaining) > maxSize && currentChunk.Len() > 0 {
+		chunks = append(chunks, currentChunk.String())
+		currentChunk.Reset()
+	}
+	currentChunk.WriteString(remaining)
 
 	if currentChunk.Len() > 0 {
 		chunks = append(chunks, currentChunk.String())
 	}
 
-	return chunks
+	// If we still have chunks that are too large, split them further
+	var result []string
+	for _, chunk := range chunks {
+		if len(chunk) > maxSize {
+			chunkBoundaries := findEnvironmentBoundaries(chunk)
+			result = append(result, splitBySizeWithEnvProtection(chunk, maxSize, chunkBoundaries)...)
+		} else {
+			result = append(result, chunk)
+		}
+	}
+
+	return result
 }
 
-// splitBySize splits content by size, trying to break at sentence boundaries.
-func splitBySize(content string, maxSize int) []string {
+// splitBySizeWithEnvProtection splits content by size while protecting environments.
+func splitBySizeWithEnvProtection(content string, maxSize int, boundaries []environmentBoundary) []string {
 	if len(content) <= maxSize {
 		return []string{content}
 	}
 
 	var chunks []string
 	remaining := content
+	offset := 0
 
 	for len(remaining) > 0 {
 		if len(remaining) <= maxSize {
@@ -981,12 +1226,63 @@ func splitBySize(content string, maxSize int) []string {
 		}
 
 		// Find a good break point within maxSize
-		breakPoint := findBreakPoint(remaining, maxSize)
-		chunks = append(chunks, remaining[:breakPoint])
-		remaining = remaining[breakPoint:]
+		targetBreak := findBreakPoint(remaining, maxSize)
+
+		// Adjust boundaries for the current offset
+		adjustedBoundaries := make([]environmentBoundary, 0)
+		for _, b := range boundaries {
+			if b.start >= offset && b.start < offset+len(remaining) {
+				adjustedBoundaries = append(adjustedBoundaries, environmentBoundary{
+					envName: b.envName,
+					start:   b.start - offset,
+					end:     b.end - offset,
+				})
+			}
+		}
+
+		// Check if break point is inside an environment
+		safeBreak := findSafeBreakPoint(remaining, targetBreak, adjustedBoundaries)
+
+		// If safe break is 0 (meaning we're at the start of a large environment),
+		// we need to include the entire environment even if it exceeds maxSize
+		if safeBreak == 0 {
+			// Find the end of the environment we're trying to avoid splitting
+			for _, b := range adjustedBoundaries {
+				if b.start == 0 {
+					safeBreak = b.end
+					break
+				}
+			}
+			// If still 0, just use the target break (shouldn't happen)
+			if safeBreak == 0 {
+				safeBreak = targetBreak
+			}
+		}
+
+		chunks = append(chunks, remaining[:safeBreak])
+		remaining = remaining[safeBreak:]
+		offset += safeBreak
 	}
 
 	return chunks
+}
+
+// splitBySections splits content by LaTeX section commands (legacy function for compatibility).
+func splitBySections(content string, maxSize int) []string {
+	boundaries := findEnvironmentBoundaries(content)
+	return splitBySectionsWithEnvProtection(content, maxSize, boundaries)
+}
+
+// splitByParagraphs splits content by paragraph boundaries (legacy function for compatibility).
+func splitByParagraphs(content string, maxSize int) []string {
+	boundaries := findEnvironmentBoundaries(content)
+	return splitByParagraphsWithEnvProtection(content, maxSize, boundaries)
+}
+
+// splitBySize splits content by size (legacy function for compatibility).
+func splitBySize(content string, maxSize int) []string {
+	boundaries := findEnvironmentBoundaries(content)
+	return splitBySizeWithEnvProtection(content, maxSize, boundaries)
 }
 
 // findBreakPoint finds a good position to break the text, preferring sentence boundaries.
@@ -1105,6 +1401,9 @@ var (
 		"proof", "cases", "matrix", "pmatrix", "bmatrix", "vmatrix", "Vmatrix",
 		"split", "subequations",
 	}
+	
+	// Float environments that need caption translation (not currently used)
+	floatEnvNames = []string{"table", "table*", "figure", "figure*", "sidewaystable", "sidewaysfigure"}
 
 	// Document structure command patterns
 	// Section commands: \section{...}, \subsection{...}, etc.
@@ -1592,6 +1891,175 @@ func GetLaTeXCommandStrings(content string) []string {
 	return result
 }
 
+// TranslateCaptionsInFloats finds all float environments (table, figure, etc.) and translates
+// only the \caption content within them. The rest of the float environment is preserved as-is.
+// This is called BEFORE the main translation to handle captions in protected environments.
+//
+// Parameters:
+//   - content: the LaTeX content to process
+//   - translateFunc: a function that translates a single caption text
+//
+// Returns:
+//   - the content with translated captions
+//   - error if translation fails
+func TranslateCaptionsInFloats(content string, translateFunc func(string) (string, error)) (string, error) {
+	result := content
+	
+	// Pattern to match \caption{...} or \caption[short]{long}
+	// We need to handle nested braces in the caption content
+	captionPattern := regexp.MustCompile(`\\caption\s*(\[[^\]]*\])?\s*\{`)
+	
+	// Find all float environments and process captions within them
+	for _, envName := range floatEnvNames {
+		beginTag := fmt.Sprintf("\\begin{%s}", envName)
+		// endTag is used internally by findMatchingEndTag
+		
+		searchPos := 0
+		for {
+			// Find the begin tag
+			beginPos := strings.Index(result[searchPos:], beginTag)
+			if beginPos == -1 {
+				break
+			}
+			beginPos += searchPos
+			
+			// Find the matching end tag
+			endPos := findMatchingEndTag(result, beginPos, envName)
+			if endPos == -1 {
+				searchPos = beginPos + len(beginTag)
+				continue
+			}
+			
+			// Extract the float environment content
+			floatContent := result[beginPos:endPos]
+			
+			// Find and translate captions within this float
+			translatedFloat, err := translateCaptionsInContent(floatContent, captionPattern, translateFunc)
+			if err != nil {
+				return "", err
+			}
+			
+			// Replace the float content with translated version
+			result = result[:beginPos] + translatedFloat + result[endPos:]
+			
+			// Move search position past this float
+			searchPos = beginPos + len(translatedFloat)
+		}
+	}
+	
+	return result, nil
+}
+
+// translateCaptionsInContent translates all \caption commands within the given content.
+func translateCaptionsInContent(content string, captionPattern *regexp.Regexp, translateFunc func(string) (string, error)) (string, error) {
+	result := content
+	offset := 0
+	
+	matches := captionPattern.FindAllStringIndex(content, -1)
+	for _, match := range matches {
+		captionStart := match[0] + offset
+		
+		// Find the opening brace position
+		braceStart := strings.Index(result[captionStart:], "{")
+		if braceStart == -1 {
+			continue
+		}
+		braceStart += captionStart
+		
+		// Find the matching closing brace
+		braceEnd := findMatchingBrace(result, braceStart)
+		if braceEnd == -1 {
+			continue
+		}
+		
+		// Extract the caption text (without braces)
+		captionText := result[braceStart+1 : braceEnd]
+		
+		// Skip if caption is empty or only contains LaTeX commands
+		if strings.TrimSpace(captionText) == "" {
+			continue
+		}
+		
+		// Check if caption contains any translatable text (not just commands/refs)
+		if !containsTranslatableText(captionText) {
+			continue
+		}
+		
+		// Translate the caption text
+		translatedCaption, err := translateFunc(captionText)
+		if err != nil {
+			logger.Warn("failed to translate caption, keeping original",
+				logger.Err(err),
+				logger.String("caption", truncateString(captionText, 50)))
+			continue
+		}
+		
+		// Replace the caption text
+		newCaption := result[:braceStart+1] + translatedCaption + result[braceEnd:]
+		
+		// Update offset for subsequent matches
+		offset += len(translatedCaption) - len(captionText)
+		result = newCaption
+	}
+	
+	return result, nil
+}
+
+// findMatchingBrace finds the position of the closing brace that matches the opening brace at pos.
+func findMatchingBrace(content string, pos int) int {
+	if pos >= len(content) || content[pos] != '{' {
+		return -1
+	}
+	
+	depth := 1
+	for i := pos + 1; i < len(content); i++ {
+		switch content[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		case '\\':
+			// Skip escaped characters
+			if i+1 < len(content) {
+				i++
+			}
+		}
+	}
+	return -1
+}
+
+// containsTranslatableText checks if the text contains any content that should be translated.
+// Returns false if the text only contains LaTeX commands, references, or math.
+func containsTranslatableText(text string) bool {
+	// Remove common LaTeX commands and check if anything remains
+	cleaned := text
+	
+	// Remove \label{...}
+	cleaned = regexp.MustCompile(`\\label\{[^}]*\}`).ReplaceAllString(cleaned, "")
+	// Remove \ref{...}, \eqref{...}, etc.
+	cleaned = regexp.MustCompile(`\\(?:ref|eqref|pageref|autoref|cref|Cref)\{[^}]*\}`).ReplaceAllString(cleaned, "")
+	// Remove \cite{...}
+	cleaned = regexp.MustCompile(`\\cite\w*(\[[^\]]*\])*\{[^}]*\}`).ReplaceAllString(cleaned, "")
+	// Remove inline math $...$
+	cleaned = regexp.MustCompile(`\$[^$]+\$`).ReplaceAllString(cleaned, "")
+	// Remove \textbf{}, \textit{}, etc. but keep their content
+	cleaned = regexp.MustCompile(`\\(?:textbf|textit|texttt|emph)\{([^}]*)\}`).ReplaceAllString(cleaned, "$1")
+	
+	// Check if any alphabetic characters remain
+	return regexp.MustCompile(`[a-zA-Z]`).MatchString(cleaned)
+}
+
+// truncateString truncates a string to maxLen characters, adding "..." if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
 // ProtectLaTeXCommands replaces LaTeX commands with placeholders for safe translation.
 // It returns the modified content and a map of placeholders to original commands.
 //
@@ -1713,6 +2181,10 @@ func GetNonMathText(content string) string {
 // - Multiple \item on same line
 // - \begin{...} and \end{...} merged with other content
 func FixLaTeXLineStructure(content string) string {
+	logger.Info("FixLaTeXLineStructure: starting",
+		logger.Int("contentLength", len(content)),
+		logger.Bool("hasTabular", strings.Contains(content, "\\begin{tabular}")))
+	
 	result := content
 
 	// Fix \end{itemize} followed by \item on same line
@@ -1757,6 +2229,17 @@ func FixLaTeXLineStructure(content string) string {
 	endListTextPattern := regexp.MustCompile(`(\\end\{(?:itemize|enumerate|description)\})([^\n\\])`)
 	result = endListTextPattern.ReplaceAllString(result, "$1\n$2")
 
+	// Fix closing brace followed by \section/\subsection/etc on same line
+	// This handles cases like: \revised{...}\subsection{...} -> \revised{...}\n\n\subsection{...}
+	// Common pattern when LLM merges lines after commands like \revised{}, \textbf{}, etc.
+	braceSectionPattern := regexp.MustCompile(`(\})\s*(\\(?:section|subsection|subsubsection|paragraph|chapter)\b)`)
+	result = braceSectionPattern.ReplaceAllString(result, "$1\n\n$2")
+
+	// Fix closing brace followed by \begin{env} on same line (for list environments)
+	// This handles cases like: \revised{...}\begin{itemize} -> \revised{...}\n\begin{itemize}
+	braceBeginListPattern := regexp.MustCompile(`(\})\s*(\\begin\{(?:itemize|enumerate|description|quote|quotation|center)\})`)
+	result = braceBeginListPattern.ReplaceAllString(result, "$1\n$2")
+
 	// Fix comment line (%%...%%) followed immediately by \abstract, \maketitle, \title, etc.
 	// Pattern: %%==...==%%\abstract{ -> %%==...==%%\n\abstract{
 	commentAbstractPattern := regexp.MustCompile(`(%%[^%\n]*%%)\s*(\\(?:abstract|maketitle|title|author|date|keywords|pacs)\b)`)
@@ -1781,10 +2264,170 @@ func FixLaTeXLineStructure(content string) string {
 	cjkCommandPattern := regexp.MustCompile(`(\\(?:cech|RR|ZZ|NN|CC|Circle|id|Diff|Met|Imm|Vect|Rn|sgn|eps|ud|SO|vol|Sym|img|re|ad|Ad|tr|rank))([\x{4E00}-\x{9FFF}])`)
 	result = cjkCommandPattern.ReplaceAllString(result, "$1{}$2")
 
+	// Fix comment line followed by \begin{...} on same line
+	// This is a critical fix for cases where LLM merges a comment line with the next \begin{...}
+	// Pattern: % comment text\begin{env} -> % comment text\n\begin{env}
+	// This happens when LLM removes empty lines between comment and \begin
+	commentBeginPattern := regexp.MustCompile(`(%[^\n]*[^\s\n])\s*(\\begin\{[^}]+\})`)
+	result = commentBeginPattern.ReplaceAllString(result, "$1\n$2")
+
+	// Fix any text (not at line start) followed by \begin{wrapfigure/figure/table/etc}
+	// These environments should always start on their own line
+	textBeginFloatPattern := regexp.MustCompile(`([^\n])\s*(\\begin\{(?:wrapfigure|figure|figure\*|table|table\*|sidewaystable|equation|align)\})`)
+	result = textBeginFloatPattern.ReplaceAllString(result, "$1\n$2")
+
+	// Fix \end{wrapfigure/figure/table} followed by text on same line
+	endFloatTextPattern := regexp.MustCompile(`(\\end\{(?:wrapfigure|figure|figure\*|table|table\*|sidewaystable)\})\s*([^\n\s\\])`)
+	result = endFloatTextPattern.ReplaceAllString(result, "$1\n$2")
+
+	// ============================================================
+	// Table-specific fixes
+	// ============================================================
+
+	// Fix: \caption{...}\footnotesize -> \caption{...}\n\footnotesize
+	// This is a common issue where LLM merges caption with table formatting commands
+	captionFootnotePattern := regexp.MustCompile(`(\\caption\{[^}]*\})\s*(\\(?:footnotesize|small|tiny|scriptsize|normalsize|large|Large|LARGE|huge|Huge)\b)`)
+	result = captionFootnotePattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \caption{...}\setlength -> \caption{...}\n\setlength
+	captionSetlengthPattern := regexp.MustCompile(`(\\caption\{[^}]*\})\s*(\\setlength)`)
+	result = captionSetlengthPattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \caption{...}\begin{tabular} -> \caption{...}\n\begin{tabular}
+	captionTabularPattern := regexp.MustCompile(`(\\caption\{[^}]*\})\s*(\\begin\{(?:tabular|tabularx|longtable|array)\})`)
+	result = captionTabularPattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \begin{tabular}{...}\toprule -> \begin{tabular}{...}\n\toprule
+	// The column spec can be very complex with nested braces, so we need a more robust pattern
+	// Match \begin{tabular} followed by any column spec (which may contain nested braces)
+	// Then match \toprule/\midrule/etc on the same line
+	tabularToprulePattern := regexp.MustCompile(`(\\begin\{(?:tabular|tabularx|longtable|array)\}\{[^}]*(?:\{[^}]*\}[^}]*)*\})\s*(\\(?:toprule|midrule|bottomrule|hline)\b)`)
+	result = tabularToprulePattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \toprule...\midrule on same line -> separate lines
+	rulePattern := regexp.MustCompile(`(\\(?:toprule|midrule|bottomrule|hline))\s*(\\(?:toprule|midrule|bottomrule|hline)\b)`)
+	result = rulePattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: table row ending with \\ followed by \midrule on same line
+	rowMidrulePattern := regexp.MustCompile(`(\\\\)\s*(\\(?:midrule|bottomrule|hline)\b)`)
+	result = rowMidrulePattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \midrule followed by table content on same line
+	midruleContentPattern := regexp.MustCompile(`(\\(?:midrule|toprule|hline))\s*(&|\w)`)
+	result = midruleContentPattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \end{tabular}\end{table} -> \end{tabular}\n\end{table}
+	endTabularTablePattern := regexp.MustCompile(`(\\end\{(?:tabular|tabularx|longtable|array)\})\s*(\\end\{(?:table|table\*)\})`)
+	result = endTabularTablePattern.ReplaceAllString(result, "$1\n$2")
+
+	// Fix: closing brace followed by \begin{tabular} on same line
+	braceTabularPattern := regexp.MustCompile(`(\})\s*(\\begin\{(?:tabular|tabularx|longtable|array)\})`)
+	result = braceTabularPattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix incomplete tabular column specs using a function-based approach
+	// This handles cases like: \begin{tabular}{@{}l cccc@{}\n\toprule
+	// where the column spec is missing the closing }
+	beforeFix := result
+	result = fixIncompleteTabularColumnSpecInTranslator(result)
+	if result != beforeFix {
+		logger.Info("FixLaTeXLineStructure: fixed incomplete tabular column spec")
+	}
+
+	// Fix: \centering followed by \caption on same line
+	centeringCaptionPattern := regexp.MustCompile(`(\\centering)\s*(\\caption)`)
+	result = centeringCaptionPattern.ReplaceAllString(result, "$1\n    $2")
+
+	// Fix: \label{...}\end{table} -> \label{...}\n\end{table}
+	labelEndTablePattern := regexp.MustCompile(`(\\label\{[^}]*\})\s*(\\end\{(?:table|table\*|figure|figure\*)\})`)
+	result = labelEndTablePattern.ReplaceAllString(result, "$1\n$2")
+
 	logger.Debug("fixed LaTeX line structure", 
 		logger.Int("originalLength", len(content)),
 		logger.Int("fixedLength", len(result)))
 
+	return result
+}
+
+// fixIncompleteTabularColumnSpecInTranslator fixes tabular column specs that are missing the closing brace.
+// This handles cases like: \begin{tabular}{@{}l cccc@{}\n\toprule
+// where the column spec should be {@{}l cccc@{}} but is missing the final }
+func fixIncompleteTabularColumnSpecInTranslator(content string) string {
+	// Find all \begin{tabular} (and variants) patterns
+	tabularPattern := regexp.MustCompile(`\\begin\{(tabular|tabularx|longtable|array)\*?\}\{`)
+	
+	result := content
+	offset := 0
+	
+	matches := tabularPattern.FindAllStringIndex(content, -1)
+	
+	logger.Info("fixIncompleteTabularColumnSpecInTranslator: checking content",
+		logger.Int("contentLength", len(content)),
+		logger.Int("tabularMatches", len(matches)))
+	
+	for _, match := range matches {
+		startIdx := match[1] + offset // Position right after the opening { of column spec
+		
+		// Find the column spec by counting braces, but STOP at newline
+		// The column spec should be on the same line as \begin{tabular}
+		braceCount := 1 // We're starting after the opening {
+		stoppedAt := "end"
+		
+		for i := startIdx; i < len(result); i++ {
+			c := result[i]
+			if c == '\n' {
+				// Stop at newline - column spec should not span multiple lines
+				stoppedAt = "newline"
+				break
+			}
+			if c == '{' {
+				braceCount++
+			} else if c == '}' {
+				braceCount--
+				if braceCount == 0 {
+					stoppedAt = "balanced"
+					break // Column spec is properly closed
+				}
+			}
+		}
+		
+		// Log the result of brace counting
+		lineEnd := strings.Index(result[startIdx:], "\n")
+		if lineEnd == -1 {
+			lineEnd = len(result) - startIdx
+		}
+		lineContent := result[startIdx:startIdx+minInt(lineEnd, 80)]
+		logger.Info("fixIncompleteTabularColumnSpecInTranslator: brace count result",
+			logger.Int("startIdx", startIdx),
+			logger.Int("braceCount", braceCount),
+			logger.String("stoppedAt", stoppedAt),
+			logger.String("lineContent", lineContent))
+		
+		// If braceCount > 0 after reaching newline, the column spec is incomplete
+		if braceCount > 0 {
+			// Find where the column spec should end (before \toprule, \midrule, \hline, or newline)
+			remaining := result[startIdx:]
+			
+			logger.Info("fixIncompleteTabularColumnSpecInTranslator: incomplete column spec found",
+				logger.Int("startIdx", startIdx),
+				logger.Int("braceCount", braceCount))
+			
+			// Look for the pattern where column spec ends with @{} followed by newline and \toprule/\midrule
+			// Pattern: ...@{}\n    \toprule or ...@{} \n\toprule
+			endPattern := regexp.MustCompile(`(@\{\})\s*\n\s*(\\(?:toprule|midrule|bottomrule|hline)\b)`)
+			if endMatch := endPattern.FindStringSubmatchIndex(remaining); endMatch != nil {
+				// Insert the missing } after @{}
+				insertPos := startIdx + endMatch[3] // Position after @{}
+				result = result[:insertPos] + "}" + result[insertPos:]
+				offset++
+				logger.Info("fixed incomplete tabular column spec in translator",
+					logger.Int("position", insertPos))
+			} else {
+				logger.Info("fixIncompleteTabularColumnSpecInTranslator: end pattern not found",
+					logger.String("remainingStart", remaining[:minInt(100, len(remaining))]))
+			}
+		}
+	}
+	
 	return result
 }
 
@@ -1797,6 +2440,9 @@ func FixLaTeXLineStructure(content string) string {
 // - Unbalanced braces in \caption commands
 // - Missing \end{environment} tags
 // - Trailing garbage braces at end of file
+// - Wrongly commented environments (LLM added % to environments that shouldn't be commented)
+// - Duplicate or misplaced \end{document}
+// - Extra closing braces after commands like \textit{...}}
 func ApplyReferenceBasedFixes(translated, original string) string {
 	if original == "" {
 		return translated
@@ -1805,36 +2451,182 @@ func ApplyReferenceBasedFixes(translated, original string) string {
 	result := translated
 	anyFixed := false
 
-	// 1. Fix table structures (resizebox closing braces)
+	// Count commented tables before fix for debugging
+	beforeCount := strings.Count(result, "% \\begin{table")
+	logger.Debug("ApplyReferenceBasedFixes: before wrongly commented fix",
+		logger.Int("commentedTables", beforeCount))
+
+	// 1. Fix wrongly commented environments FIRST (most critical for compilation)
+	// This must run before FixByLineComparison because line numbers may not match
+	result, wrongCommentFixed := fixWronglyCommentedEnvironments(result, original)
+	if wrongCommentFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed wrongly commented environments")
+	}
+
+	// 1.5. Restore missing \input commands that were deleted during translation
+	result, inputRestored := fixMissingInputCommands(result, original)
+	if inputRestored {
+		anyFixed = true
+		logger.Debug("reference-based fix: restored missing \\input commands")
+	}
+
+	// 1.6. Restore missing appendix section if it was truncated during translation
+	result, appendixRestored := fixMissingAppendixSection(result, original)
+	if appendixRestored {
+		anyFixed = true
+		logger.Debug("reference-based fix: restored missing appendix section")
+	}
+
+	// 1.7. Fix wrongly uncommented \bibliography commands in preamble
+	// If original has commented \bibliography in preamble, ensure translated also has it commented
+	result, bibFixed := fixWronglyUncommentedBibliography(result, original)
+	if bibFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed wrongly uncommented \\bibliography in preamble")
+	}
+
+	// Count commented tables after fix for debugging
+	afterCount := strings.Count(result, "% \\begin{table")
+	logger.Debug("ApplyReferenceBasedFixes: after wrongly commented fix",
+		logger.Int("commentedTables", afterCount),
+		logger.Bool("fixed", wrongCommentFixed))
+
+	// 2. Apply line-by-line comparison fix (for line-aligned content)
+	lineFixResult := FixByLineComparison(result, original)
+	if lineFixResult.FixCount > 0 {
+		result = lineFixResult.Fixed
+		anyFixed = true
+		logger.Debug("reference-based fix: applied line-by-line fixes",
+			logger.Int("fixCount", lineFixResult.FixCount))
+	}
+
+	// Count commented tables after line-by-line fix for debugging
+	afterLineFixCount := strings.Count(result, "% \\begin{table")
+	logger.Debug("ApplyReferenceBasedFixes: after line-by-line fix",
+		logger.Int("commentedTables", afterLineFixCount))
+
+	// 3. Fix duplicate/misplaced \end{document} (critical)
+	result, endDocFixed := fixDuplicateEndDocument(result, original)
+	if endDocFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed duplicate/misplaced \\end{document}")
+	}
+
+	// 4. Fix table structures (resizebox closing braces)
 	result, tableFixed := fixTableResizeboxBraces(result, original)
 	if tableFixed {
 		anyFixed = true
 		logger.Debug("reference-based fix: fixed table resizebox braces")
 	}
 
-	// 2. Fix caption brace issues
+	// 5. Fix caption brace issues
 	result, captionFixed := fixCaptionBraceIssues(result, original)
 	if captionFixed {
 		anyFixed = true
 		logger.Debug("reference-based fix: fixed caption brace issues")
 	}
 
-	// 3. Fix trailing garbage braces
+	// 6. Fix extra closing braces (e.g., \textit{...}})
+	result, extraBraceFixed := fixExtraClosingBraces(result, original)
+	if extraBraceFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed extra closing braces")
+	}
+
+	// 6. Fix trailing garbage braces
 	result, trailingFixed := fixTrailingGarbageByReference(result, original)
 	if trailingFixed {
 		anyFixed = true
 		logger.Debug("reference-based fix: fixed trailing garbage braces")
 	}
 
-	// 4. Fix environment structure
+	// 7. Fix environment structure
 	result, envFixed := fixEnvironmentStructureByReference(result, original)
 	if envFixed {
 		anyFixed = true
 		logger.Debug("reference-based fix: fixed environment structure")
 	}
 
+	// 8. Fix missing comment markers (original has % but translated doesn't)
+	result, commentFixed := fixMissingCommentsByReference(result, original)
+	if commentFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed missing comment markers")
+	}
+
 	if anyFixed {
 		logger.Info("applied reference-based fixes to translated content")
+	}
+
+	// 9. Fix multirow/multicolumn brace issues (run on final content)
+	beforeMultirowFix := result
+	result = FixMultirowMulticolumnBracesGlobal(result)
+	if result != beforeMultirowFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed multirow/multicolumn braces")
+	}
+
+	// 10. Fix table environment line structure issues
+	// This fixes cases where } (closing scalebox) is merged with following text
+	beforeTableFix := result
+	result = FixTableEnvironmentLineStructure(result)
+	if result != beforeTableFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed table environment line structure")
+	}
+
+	// 11. Fix scalebox closing brace issues (more specific fix)
+	beforeScaleboxFix := result
+	result = FixScaleboxClosingBrace(result)
+	if result != beforeScaleboxFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed scalebox closing braces")
+	}
+
+	// 12. Fix \end{tabular}} merged braces
+	// This fixes cases where } is merged with \end{tabular} on the same line
+	beforeTabularFix := result
+	result = FixEndTabularBraces(result)
+	if result != beforeTabularFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed end tabular braces")
+	}
+
+	// 13. Fix sidewaystable structure issues
+	// This fixes cases where \end{sidewaystable} is placed in the wrong position
+	beforeSidewaystableFix := result
+	result = FixSidewaystableStructure(result)
+	if result != beforeSidewaystableFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed sidewaystable structure")
+	}
+
+	// 14. Fix extra closing brace after \end{table*}
+	// This fixes cases where there's an extra } that doesn't match any opening brace
+	beforeExtraBraceFix := result
+	result = FixExtraClosingBraceAfterTable(result)
+	if result != beforeExtraBraceFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed extra closing brace after table")
+	}
+
+	// 15. Fix opening brace { merged with comment line
+	// This fixes cases where { is incorrectly merged to end of a comment line
+	beforeBraceMergedFix := result
+	result = FixBraceMergedWithComment(result)
+	if result != beforeBraceMergedFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed brace merged with comment")
+	}
+
+	// 16. Clean CCS metadata with mathematical italic characters
+	// This fixes cases where XML tags like <conceptid> are rendered as math italics
+	beforeCCSFix := result
+	result = CleanCCSMathItalics(result)
+	if result != beforeCCSFix {
+		anyFixed = true
+		logger.Debug("reference-based fix: cleaned CCS math italics")
 	}
 
 	return result
@@ -1892,11 +2684,14 @@ func fixCaptionBraceIssues(translated, original string) (string, bool) {
 		replace string
 	}{
 		// \textbf{\textit{X}= -> \textbf{\textit{X}}=
-		{regexp.MustCompile(`(\\textbf\{\\textit\{[^}]+)\}([=,;:，；：])`), "${1}}}${2}"},
+		// The } closes \textit, but we need another } to close \textbf before =
+		{regexp.MustCompile(`(\\textbf\{\\textit\{[^}]+\})=`), "${1}}="},
+		// Same pattern with other separators
+		{regexp.MustCompile(`(\\textbf\{\\textit\{[^}]+\})[,;:，；：]`), "${1}}"},
 		// \textbf{\textit{X}） -> \textbf{\textit{X}}）
-		{regexp.MustCompile(`(\\textbf\{\\textit\{[^}]+)\}([）\)])`), "${1}}}${2}"},
-		// Similar for other nested commands
-		{regexp.MustCompile(`(\\textit\{\\textbf\{[^}]+)\}([=,;:，；：])`), "${1}}}${2}"},
+		{regexp.MustCompile(`(\\textbf\{\\textit\{[^}]+\})[）\)]`), "${1}}"},
+		// Similar for other nested commands (textit containing textbf)
+		{regexp.MustCompile(`(\\textit\{\\textbf\{[^}]+\})=`), "${1}}="},
 	}
 
 	result := translated
@@ -1904,8 +2699,14 @@ func fixCaptionBraceIssues(translated, original string) (string, bool) {
 
 	for _, p := range patterns {
 		if p.pattern.MatchString(result) {
-			result = p.pattern.ReplaceAllString(result, p.replace)
-			fixed = true
+			newResult := p.pattern.ReplaceAllString(result, p.replace)
+			if newResult != result {
+				logger.Debug("fixCaptionBraceIssues: pattern matched",
+					logger.String("before", result),
+					logger.String("after", newResult))
+				result = newResult
+				fixed = true
+			}
 		}
 	}
 
@@ -1999,8 +2800,564 @@ func fixEnvironmentStructureByReference(translated, original string) (string, bo
 	return result, fixed
 }
 
+// fixMissingCommentsByReference fixes cases where LLM translation removed comment markers
+// from lines that should be commented. This compares the original and translated content
+// to detect environments that are commented in original but not in translated.
+// 
+// IMPORTANT: This function should NOT comment environments that are uncommented in the original.
+// It only adds comments to environments that are ALWAYS commented in the original.
+func fixMissingCommentsByReference(translated, original string) (string, bool) {
+	// Build a map of commented environments in original
+	// Pattern: lines starting with % followed by \begin{env} or \end{env}
+	commentedEnvPattern := regexp.MustCompile(`(?m)^%\s*(\\(?:begin|end)\{[^}]+\})`)
+	
+	origCommentedEnvs := make(map[string]bool)
+	for _, match := range commentedEnvPattern.FindAllStringSubmatch(original, -1) {
+		origCommentedEnvs[match[1]] = true
+	}
+	
+	if len(origCommentedEnvs) == 0 {
+		return translated, false
+	}
+	
+	// Also build a map of UNcommented environments in original
+	// If an environment appears both commented and uncommented, we should NOT add comments
+	uncommentedEnvPattern := regexp.MustCompile(`(?m)^[^%\n]*(\\(?:begin|end)\{[^}]+\})`)
+	origUncommentedEnvs := make(map[string]bool)
+	for _, match := range uncommentedEnvPattern.FindAllStringSubmatch(original, -1) {
+		origUncommentedEnvs[match[1]] = true
+	}
+	
+	// Remove environments that appear both commented and uncommented
+	// These are ambiguous and should not be auto-commented
+	for env := range origUncommentedEnvs {
+		delete(origCommentedEnvs, env)
+	}
+	
+	if len(origCommentedEnvs) == 0 {
+		return translated, false
+	}
+	
+	// Check translated content for uncommented versions of these environments
+	lines := strings.Split(translated, "\n")
+	fixed := false
+	
+	for i, line := range lines {
+		trimmedLine := strings.TrimSpace(line)
+		// Skip already commented lines
+		if strings.HasPrefix(trimmedLine, "%") {
+			continue
+		}
+		
+		// Check if this line contains an environment that should be commented
+		for commentedEnv := range origCommentedEnvs {
+			if strings.Contains(trimmedLine, commentedEnv) {
+				// This environment should be commented but isn't
+				lines[i] = "% " + line
+				fixed = true
+				logger.Debug("fixed missing comment marker",
+					logger.String("line", trimmedLine),
+					logger.String("env", commentedEnv))
+				break
+			}
+		}
+	}
+	
+	if fixed {
+		return strings.Join(lines, "\n"), true
+	}
+	
+	return translated, false
+}
 
-// cleanTranslationResult removes JSON formatting artifacts and other issues from translation results
+// fixWronglyCommentedEnvironments fixes cases where LLM translation incorrectly added
+// comment markers to environments that are NOT commented in the original.
+// This is the opposite of fixMissingCommentsByReference.
+// Also handles sectioning commands like \section, \subsection, etc.
+// Also handles \input and \include commands.
+func fixWronglyCommentedEnvironments(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	result := translated
+	fixed := false
+
+	// Part 1: Fix wrongly commented \begin{} and \end{} environments
+	// Find all environments in original that are NOT commented
+	// Pattern: \begin{env} or \end{env} that is NOT preceded by %
+	envPattern := regexp.MustCompile(`(?m)^([^%\n]*)(\\(?:begin|end)\{([^}]+)\})`)
+
+	origUncommentedEnvs := make(map[string]bool)
+	for _, match := range envPattern.FindAllStringSubmatch(original, -1) {
+		// match[2] is the full \begin{env} or \end{env}
+		// match[3] is just the env name
+		origUncommentedEnvs[match[2]] = true
+	}
+
+	if len(origUncommentedEnvs) > 0 {
+		// Check translated content for commented versions of these environments
+		// Pattern: % \begin{env} or % \end{env} (with optional spaces after %)
+		// Also handle cases like "% \begin{table*}[]"
+		commentedEnvPattern := regexp.MustCompile(`(?m)^(\s*)%\s*(\\(?:begin|end)\{([^}]+)\}(\[\])?)`)
+
+		commentedMatches := commentedEnvPattern.FindAllStringSubmatch(result, -1)
+
+		for _, match := range commentedMatches {
+			envCmd := match[2] // e.g., \begin{figure*} or \begin{table*}[]
+			// Normalize: remove [] suffix for comparison
+			envCmdNormalized := strings.TrimSuffix(envCmd, "[]")
+			
+			// Check if this environment (with or without []) is uncommented in original
+			if origUncommentedEnvs[envCmd] || origUncommentedEnvs[envCmdNormalized] || origUncommentedEnvs[envCmdNormalized+"[]"] {
+				// This environment is NOT commented in original but IS commented in translated
+				// Remove the comment marker
+				oldLine := match[0]
+				newLine := match[1] + match[2] // preserve leading whitespace, remove % 
+				if match[4] != "" {
+					newLine = match[1] + match[2] // include the [] if present
+				}
+				logger.Info("fixWronglyCommentedEnvironments: fixing env",
+					logger.String("env", envCmd))
+				result = strings.Replace(result, oldLine, newLine, 1)
+				fixed = true
+				logger.Debug("fixed wrongly commented environment",
+					logger.String("env", envCmd))
+			}
+		}
+	}
+
+	// Part 2: Fix wrongly commented sectioning commands (\section, \subsection, etc.)
+	// Pattern: \section{...} or \subsection{...} etc. that is NOT preceded by %
+	sectionPattern := regexp.MustCompile(`(?m)^([^%\n]*)(\\(?:section|subsection|subsubsection|paragraph|chapter)\*?\{[^}]*\})`)
+
+	origUncommentedSections := make(map[string]bool)
+	for _, match := range sectionPattern.FindAllStringSubmatch(original, -1) {
+		// match[2] is the full \section{...} command
+		origUncommentedSections[match[2]] = true
+	}
+
+	if len(origUncommentedSections) > 0 {
+		// Check translated content for commented versions of these sections
+		// Pattern: % \section{...} (with optional spaces after %)
+		commentedSectionPattern := regexp.MustCompile(`(?m)^(\s*)%+\s*(\\(?:section|subsection|subsubsection|paragraph|chapter)\*?\{[^}]*\})`)
+
+		for _, match := range commentedSectionPattern.FindAllStringSubmatch(result, -1) {
+			sectionCmd := match[2] // e.g., \section{Position}
+			
+			// Check if this section command is uncommented in original
+			if origUncommentedSections[sectionCmd] {
+				// This section is NOT commented in original but IS commented in translated
+				// Remove the comment marker
+				oldLine := match[0]
+				newLine := match[1] + match[2] // preserve leading whitespace, remove %
+				result = strings.Replace(result, oldLine, newLine, 1)
+				fixed = true
+				logger.Debug("fixed wrongly commented section",
+					logger.String("section", sectionCmd))
+			}
+		}
+	}
+
+	// Part 3: Fix wrongly commented \input and \include commands
+	// Pattern: \input{...} or \include{...} that is NOT preceded by %
+	inputPattern := regexp.MustCompile(`(?m)^([^%\n]*)(\\(?:input|include)\{([^}]+)\})`)
+
+	origUncommentedInputs := make(map[string]bool)
+	for _, match := range inputPattern.FindAllStringSubmatch(original, -1) {
+		// match[2] is the full \input{...} or \include{...} command
+		origUncommentedInputs[match[2]] = true
+	}
+
+	if len(origUncommentedInputs) > 0 {
+		// Check translated content for commented versions of these input commands
+		// Pattern: % \input{...} (with optional spaces after %)
+		commentedInputPattern := regexp.MustCompile(`(?m)^(\s*)%+\s*(\\(?:input|include)\{([^}]+)\})`)
+
+		for _, match := range commentedInputPattern.FindAllStringSubmatch(result, -1) {
+			inputCmd := match[2] // e.g., \input{sections/intro}
+			
+			// Check if this input command is uncommented in original
+			if origUncommentedInputs[inputCmd] {
+				// This input is NOT commented in original but IS commented in translated
+				// Remove the comment marker
+				oldLine := match[0]
+				newLine := match[1] + match[2] // preserve leading whitespace, remove %
+				result = strings.Replace(result, oldLine, newLine, 1)
+				fixed = true
+				logger.Debug("fixed wrongly commented input/include",
+					logger.String("cmd", inputCmd))
+			}
+		}
+	}
+
+	// Part 4: Clean up garbage after \input commands
+	// Sometimes LLM appends random content after \input{...} on the same line
+	// Pattern: \input{...} followed by non-whitespace content that's not a comment
+	inputGarbagePattern := regexp.MustCompile(`(\\input\{[^}]+\})\s+([^%\s][^\n]*)`)
+	if inputGarbagePattern.MatchString(result) {
+		result = inputGarbagePattern.ReplaceAllString(result, "$1")
+		fixed = true
+		logger.Debug("cleaned up garbage after \\input commands")
+	}
+
+	return result, fixed
+}
+
+// fixMissingAppendixSection restores the entire appendix section if it was truncated during translation.
+// This handles cases where LLM output was truncated and the appendix section (including \appendix,
+// \onecolumn, \input{appendix}, etc.) was lost.
+func fixMissingAppendixSection(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	// Check if original has \appendix command
+	appendixPattern := regexp.MustCompile(`(?m)^[^%\n]*\\appendix\b`)
+	if !appendixPattern.MatchString(original) {
+		// Original doesn't have appendix section
+		return translated, false
+	}
+
+	// Check if translated already has \appendix command
+	if appendixPattern.MatchString(translated) {
+		// Translated already has appendix, no need to restore
+		return translated, false
+	}
+
+	logger.Info("detected missing \\appendix section, attempting to restore")
+
+	// Find the appendix section in original
+	// Look for \appendix and extract everything from there to \end{document}
+	origAppendixIdx := -1
+	origLines := strings.Split(original, "\n")
+	for i, line := range origLines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, `\appendix`) && !strings.HasPrefix(trimmed, "%") {
+			origAppendixIdx = i
+			break
+		}
+	}
+
+	if origAppendixIdx == -1 {
+		return translated, false
+	}
+
+	// Find \end{document} in original
+	origEndDocIdx := -1
+	for i := len(origLines) - 1; i >= origAppendixIdx; i-- {
+		if strings.Contains(origLines[i], `\end{document}`) {
+			origEndDocIdx = i
+			break
+		}
+	}
+
+	if origEndDocIdx == -1 {
+		return translated, false
+	}
+
+	// Extract the appendix section from original (from \appendix to just before \end{document})
+	appendixSection := strings.Join(origLines[origAppendixIdx:origEndDocIdx], "\n")
+
+	// Find \end{document} in translated
+	transLines := strings.Split(translated, "\n")
+	transEndDocIdx := -1
+	for i := len(transLines) - 1; i >= 0; i-- {
+		if strings.Contains(transLines[i], `\end{document}`) {
+			transEndDocIdx = i
+			break
+		}
+	}
+
+	if transEndDocIdx == -1 {
+		// No \end{document} in translated, append at the end
+		result := translated + "\n\n" + appendixSection + "\n\\end{document}\n"
+		logger.Info("restored missing appendix section (appended at end)")
+		return result, true
+	}
+
+	// Insert appendix section before \end{document}
+	var newLines []string
+	newLines = append(newLines, transLines[:transEndDocIdx]...)
+	newLines = append(newLines, "") // Empty line before appendix
+	newLines = append(newLines, appendixSection)
+	newLines = append(newLines, "") // Empty line before \end{document}
+	newLines = append(newLines, transLines[transEndDocIdx:]...)
+
+	result := strings.Join(newLines, "\n")
+	logger.Info("restored missing appendix section",
+		logger.Int("appendixLines", origEndDocIdx-origAppendixIdx))
+
+	return result, true
+}
+
+// fixMissingInputCommands restores \input and \include commands that were deleted during translation.
+// It compares the original and translated content and restores any missing \input commands
+// by inserting them at the appropriate location (after \begin{document}).
+func fixMissingInputCommands(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	// Extract all \input and \include commands from original (non-commented)
+	inputPattern := regexp.MustCompile(`(?m)^[^%\n]*(\\(?:input|include)\{([^}]+)\})`)
+	
+	origInputs := make([]string, 0)
+	origInputSet := make(map[string]bool)
+	for _, match := range inputPattern.FindAllStringSubmatch(original, -1) {
+		cmd := match[1] // e.g., \input{sections/intro}
+		if !origInputSet[cmd] {
+			origInputs = append(origInputs, cmd)
+			origInputSet[cmd] = true
+		}
+	}
+
+	if len(origInputs) == 0 {
+		return translated, false
+	}
+
+	// Extract all \input and \include commands from translated (non-commented)
+	transInputSet := make(map[string]bool)
+	for _, match := range inputPattern.FindAllStringSubmatch(translated, -1) {
+		cmd := match[1]
+		transInputSet[cmd] = true
+	}
+
+	// Find missing inputs
+	missingInputs := make([]string, 0)
+	for _, cmd := range origInputs {
+		if !transInputSet[cmd] {
+			missingInputs = append(missingInputs, cmd)
+		}
+	}
+
+	if len(missingInputs) == 0 {
+		return translated, false
+	}
+
+	logger.Info("found missing \\input commands, attempting to restore",
+		logger.Int("missingCount", len(missingInputs)),
+		logger.String("missing", strings.Join(missingInputs, ", ")))
+
+	result := translated
+	fixed := false
+
+	// For each missing input, try to find where it should be inserted
+	// Strategy: Find the input command that comes BEFORE it in the original,
+	// then insert after that command in the translated content
+	for _, missingCmd := range missingInputs {
+		// Find the position of this command in the original
+		missingIdx := -1
+		for i, cmd := range origInputs {
+			if cmd == missingCmd {
+				missingIdx = i
+				break
+			}
+		}
+
+		if missingIdx == -1 {
+			continue
+		}
+
+		// Find the previous input command that exists in translated
+		var insertAfter string
+		for i := missingIdx - 1; i >= 0; i-- {
+			if transInputSet[origInputs[i]] {
+				insertAfter = origInputs[i]
+				break
+			}
+		}
+
+		if insertAfter != "" {
+			// Insert after the previous command
+			// Find the line containing insertAfter and add the missing command after it
+			lines := strings.Split(result, "\n")
+			var newLines []string
+			inserted := false
+			for _, line := range lines {
+				newLines = append(newLines, line)
+				if !inserted && strings.Contains(line, insertAfter) && !strings.HasPrefix(strings.TrimSpace(line), "%") {
+					// Insert the missing command after this line
+					newLines = append(newLines, missingCmd)
+					inserted = true
+					fixed = true
+					logger.Debug("restored missing \\input command",
+						logger.String("cmd", missingCmd),
+						logger.String("afterCmd", insertAfter))
+				}
+			}
+			if inserted {
+				result = strings.Join(newLines, "\n")
+				transInputSet[missingCmd] = true // Mark as present now
+			}
+		} else {
+			// No previous command found, try to insert after \begin{document}
+			beginDocIdx := strings.Index(result, `\begin{document}`)
+			if beginDocIdx != -1 {
+				// Find the end of the \begin{document} line
+				endOfLine := strings.Index(result[beginDocIdx:], "\n")
+				if endOfLine != -1 {
+					insertPos := beginDocIdx + endOfLine + 1
+					result = result[:insertPos] + missingCmd + "\n" + result[insertPos:]
+					fixed = true
+					transInputSet[missingCmd] = true
+					logger.Debug("restored missing \\input command after \\begin{document}",
+						logger.String("cmd", missingCmd))
+				}
+			}
+		}
+	}
+
+	return result, fixed
+}
+
+// fixWronglyUncommentedBibliography fixes cases where LLM translation incorrectly removed
+// comment markers from \bibliography commands that ARE commented in the original.
+// This is particularly important for \bibliography commands in the preamble, which should
+// remain commented to avoid putting thebibliography in the wrong place.
+func fixWronglyUncommentedBibliography(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	// Find \begin{document} in both original and translated
+	origBeginDocIdx := strings.Index(original, `\begin{document}`)
+	transBeginDocIdx := strings.Index(translated, `\begin{document}`)
+
+	if origBeginDocIdx == -1 || transBeginDocIdx == -1 {
+		return translated, false
+	}
+
+	origPreamble := original[:origBeginDocIdx]
+	transPreamble := translated[:transBeginDocIdx]
+	transBody := translated[transBeginDocIdx:]
+
+	result := translated
+	fixed := false
+
+	// Find commented \bibliography commands in original preamble
+	// Pattern: % \bibliography{...} (with optional spaces after %)
+	commentedBibPattern := regexp.MustCompile(`(?m)^(\s*)%+\s*(\\bibliography\{[^}]+\})`)
+	origCommentedBibs := make(map[string]bool)
+	for _, match := range commentedBibPattern.FindAllStringSubmatch(origPreamble, -1) {
+		bibCmd := match[2] // e.g., \bibliography{main}
+		origCommentedBibs[bibCmd] = true
+	}
+
+	if len(origCommentedBibs) == 0 {
+		return translated, false
+	}
+
+	// Find uncommented \bibliography commands in translated preamble
+	// Pattern: line that contains \bibliography{...} but does NOT start with %
+	// We need to be careful: the line should not have % before \bibliography
+	uncommentedBibPattern := regexp.MustCompile(`(?m)^([^%\n]*?)(\\bibliography\{([^}]+)\})`)
+	
+	allMatches := uncommentedBibPattern.FindAllStringSubmatch(transPreamble, -1)
+	
+	for _, match := range allMatches {
+		prefix := match[1]  // content before \bibliography (should not contain %)
+		bibCmd := match[2]  // e.g., \bibliography{main}
+
+		// Check if this bibliography command is commented in original
+		if origCommentedBibs[bibCmd] {
+			// This bibliography is commented in original but NOT commented in translated
+			// Comment it out
+			oldLine := match[0]
+			newLine := prefix + "% " + bibCmd
+			transPreamble = strings.Replace(transPreamble, oldLine, newLine, 1)
+			fixed = true
+			logger.Debug("fixed wrongly uncommented \\bibliography in preamble",
+				logger.String("cmd", bibCmd))
+		}
+	}
+
+	if fixed {
+		result = transPreamble + transBody
+	}
+
+	return result, fixed
+}
+
+// fixDuplicateEndDocument removes duplicate or misplaced \end{document} tags.
+// There should only be ONE \end{document} at the very end of the file.
+func fixDuplicateEndDocument(translated, original string) (string, bool) {
+	endDocPattern := regexp.MustCompile(`\\end\{document\}`)
+	matches := endDocPattern.FindAllStringIndex(translated, -1)
+
+	if len(matches) <= 1 {
+		return translated, false
+	}
+
+	// Multiple \end{document} found - keep only the last one
+	logger.Warn("found multiple \\end{document} tags",
+		logger.Int("count", len(matches)))
+
+	result := translated
+	// Remove all but the last \end{document}
+	for i := 0; i < len(matches)-1; i++ {
+		result = strings.Replace(result, "\\end{document}", "%%REMOVED_END_DOC%%", 1)
+	}
+	// Clean up the markers (remove the lines entirely if they only contain the marker)
+	lines := strings.Split(result, "\n")
+	var cleanedLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "%%REMOVED_END_DOC%%" {
+			// Skip this line entirely
+			continue
+		}
+		// Replace marker with empty string if it's part of a larger line
+		line = strings.ReplaceAll(line, "%%REMOVED_END_DOC%%", "")
+		cleanedLines = append(cleanedLines, line)
+	}
+	result = strings.Join(cleanedLines, "\n")
+
+	return result, true
+}
+
+// fixExtraClosingBraces fixes patterns like \textit{...}} where there's an extra }
+// This commonly happens when LLM adds extra braces after commands.
+func fixExtraClosingBraces(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	// Common patterns where LLM adds extra closing braces
+	// IMPORTANT: These patterns should only match when the }} is truly extra,
+	// not when the second } is closing a parent command like \textbf{\textit{n}}
+	patterns := []struct {
+		pattern *regexp.Regexp
+		replace string
+		desc    string
+	}{
+		// \textit{...}} followed by space or end -> \textit{...}
+		// The (?:\s|$) ensures we only match when }} is at word boundary
+		{regexp.MustCompile(`(\\textit\{[^{}]*)\}\}(\s|$|[&,;])`), "$1}$2", "textit double brace"},
+		// \textbf{...}} followed by space or end -> \textbf{...}
+		{regexp.MustCompile(`(\\textbf\{[^{}]*)\}\}(\s|$|[&,;])`), "$1}$2", "textbf double brace"},
+		// \emph{...}} followed by space or end -> \emph{...}
+		{regexp.MustCompile(`(\\emph\{[^{}]*)\}\}(\s|$|[&,;])`), "$1}$2", "emph double brace"},
+		// \underline{...}} followed by space or end -> \underline{...}
+		{regexp.MustCompile(`(\\underline\{[^{}]*)\}\}(\s|$|[&,;])`), "$1}$2", "underline double brace"},
+	}
+
+	result := translated
+	fixed := false
+
+	for _, p := range patterns {
+		if p.pattern.MatchString(result) {
+			newResult := p.pattern.ReplaceAllString(result, p.replace)
+			if newResult != result {
+				result = newResult
+				fixed = true
+				logger.Debug("fixed extra closing braces", logger.String("pattern", p.desc))
+			}
+		}
+	}
+
+	return result, fixed
+}
 func cleanTranslationResult(content string) string {
 	// Remove JSON wrapper if present
 	if strings.Contains(content, "```json") {
@@ -2021,4 +3378,12 @@ func cleanTranslationResult(content string) string {
 	content = strings.TrimSpace(content)
 	
 	return content
+}
+
+// minInt returns the smaller of two integers.
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

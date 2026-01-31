@@ -57,7 +57,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-echo [1/3] 安装前端依赖...
+echo [1/4] 安装前端依赖...
 cd frontend
 call npm install
 if %errorlevel% neq 0 (
@@ -69,7 +69,7 @@ if %errorlevel% neq 0 (
 cd ..
 
 echo.
-echo [2/3] 构建前端...
+echo [2/4] 构建前端...
 cd frontend
 call npm run build
 if %errorlevel% neq 0 (
@@ -81,7 +81,7 @@ if %errorlevel% neq 0 (
 cd ..
 
 echo.
-echo [3/3] 构建 Windows 可执行文件...
+echo [3/4] 构建 Windows 可执行文件...
 wails build -clean -platform windows/amd64
 if %errorlevel% neq 0 (
     echo 错误: Wails 构建失败
@@ -89,12 +89,23 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+echo.
+echo [4/4] 编译辅助工具...
+if not exist "build\tools" mkdir build\tools
+go build -o build\tools\fetch_arxiv_ids.exe ./cmd/fetch_arxiv_ids
+if %errorlevel% neq 0 (
+    echo 错误: fetch_arxiv_ids 编译失败
+    pause
+    exit /b 1
+)
+echo   已生成 build\tools\fetch_arxiv_ids.exe
+
 :create_installer
 REM 检查是否需要创建安装程序
 if %BUILD_INSTALLER%==0 goto show_result
 
 echo.
-echo [4/4] 创建 NSIS 安装程序...
+echo [5/5] 创建 NSIS 安装程序...
 
 REM 检查 NSIS 是否安装
 where makensis >nul 2>nul
@@ -172,3 +183,5 @@ echo   build.cmd -n           - 同上（简写）
 echo   build.cmd --skip-build - 仅创建安装程序（跳过构建）
 echo ----------------------------------------
 echo.
+
+goto :eof

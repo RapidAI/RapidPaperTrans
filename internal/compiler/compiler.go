@@ -26,6 +26,8 @@ const (
 	CompilerPDFLaTeX = "pdflatex"
 	// CompilerXeLaTeX is the xelatex compiler
 	CompilerXeLaTeX = "xelatex"
+	// CompilerLuaLaTeX is the lualatex compiler
+	CompilerLuaLaTeX = "lualatex"
 )
 
 // DefaultTimeout is the default compilation timeout
@@ -67,10 +69,11 @@ func (c *LaTeXCompiler) Compile(texPath string, outputDir string) (*types.Compil
 	}
 
 	// Step 2: Apply TikZ and syntax fixes to all tex files
-	if err := c.autoFixSyntax(texDir); err != nil {
-		logger.Warn("syntax auto-fix failed", logger.Err(err))
-		// Continue anyway
-	}
+	// NOTE: Disabled for now as it can cause issues with some documents
+	// if err := c.autoFixSyntax(texDir); err != nil {
+	// 	logger.Warn("syntax auto-fix failed", logger.Err(err))
+	// 	// Continue anyway
+	// }
 
 	// Read the tex file to check for Chinese characters
 	content, err := os.ReadFile(texPath)
@@ -83,13 +86,18 @@ func (c *LaTeXCompiler) Compile(texPath string, outputDir string) (*types.Compil
 	}
 
 	// Apply QuickFix to fix common LaTeX issues (like bibliography order)
-	fixedContent, wasFixed := QuickFix(string(content))
-	if wasFixed {
-		logger.Info("applied QuickFix before compilation", logger.String("texPath", texPath))
-		if err := os.WriteFile(texPath, []byte(fixedContent), 0644); err != nil {
-			logger.Warn("failed to write QuickFix changes", logger.Err(err))
+	// NOTE: QuickFix is designed for translated documents and can break original documents
+	// Only apply it to files that look like translated documents (contain "translated_" in name)
+	texBaseName := filepath.Base(texPath)
+	if strings.HasPrefix(texBaseName, "translated_") {
+		fixedContent, wasFixed := QuickFix(string(content))
+		if wasFixed {
+			logger.Info("applied QuickFix before compilation", logger.String("texPath", texPath))
+			if err := os.WriteFile(texPath, []byte(fixedContent), 0644); err != nil {
+				logger.Warn("failed to write QuickFix changes", logger.Err(err))
+			}
+			content = []byte(fixedContent)
 		}
-		content = []byte(fixedContent)
 	}
 
 	// Auto-select compiler based on content (including input files)
@@ -136,6 +144,26 @@ func (c *LaTeXCompiler) CompileWithPDFLaTeX(texPath string, outputDir string) (*
 	return c.compileWithCompiler(texPath, outputDir, CompilerPDFLaTeX)
 }
 
+// CompileWithLuaLaTeX compiles a tex file using lualatex
+// LuaLaTeX has better UTF-8 support than XeLaTeX, especially for Chinese characters on Windows
+func (c *LaTeXCompiler) CompileWithLuaLaTeX(texPath string, outputDir string) (*types.CompileResult, error) {
+	logger.Info("compiling with LuaLaTeX", logger.String("texPath", texPath))
+	
+	// Apply QuickFix before compilation
+	content, err := os.ReadFile(texPath)
+	if err == nil {
+		fixedContent, fixed := QuickFix(string(content))
+		if fixed {
+			logger.Info("applied QuickFix before LuaLaTeX compilation", logger.String("texPath", texPath))
+			if err := os.WriteFile(texPath, []byte(fixedContent), 0644); err != nil {
+				logger.Warn("failed to write QuickFix changes", logger.Err(err))
+			}
+		}
+	}
+	
+	return c.compileWithCompiler(texPath, outputDir, CompilerLuaLaTeX)
+}
+
 // selectCompiler selects the appropriate compiler based on content.
 // If the content contains Chinese characters, xelatex is selected.
 // It also checks all \input and \include files for Chinese content.
@@ -149,6 +177,8 @@ func (c *LaTeXCompiler) selectCompiler(content string) string {
 
 // selectCompilerWithInputFiles selects the appropriate compiler by checking
 // the main file and all referenced input files for Chinese content.
+// NOTE: We now only use xelatex if the document explicitly requires it (uses fontspec, xeCJK, or ctex).
+// Simply having Chinese characters is not enough, as pdflatex with CJKutf8 can handle many cases.
 func (c *LaTeXCompiler) selectCompilerWithInputFiles(mainTexPath string) string {
 	// Read main file
 	content, err := os.ReadFile(mainTexPath)
@@ -156,45 +186,45 @@ func (c *LaTeXCompiler) selectCompilerWithInputFiles(mainTexPath string) string 
 		return c.compiler
 	}
 
-	// Check main file
-	if ContainsChinese(string(content)) {
-		logger.Debug("Chinese detected in main file, using xelatex")
-		return CompilerXeLaTeX
+	contentStr := string(content)
+
+	// Check if document explicitly requires xelatex
+	// These packages require xelatex/lualatex
+	xelatexPackages := []string{
+		"\\usepackage{fontspec}",
+		"\\usepackage{xeCJK}",
+		"\\usepackage{ctex}",
+		"\\usepackage[ctex]",
+		"\\RequirePackage{fontspec}",
+		"\\RequirePackage{xeCJK}",
+		"\\RequirePackage{ctex}",
 	}
 
-	// Find all \input and \include files
+	for _, pkg := range xelatexPackages {
+		if strings.Contains(contentStr, pkg) {
+			logger.Debug("xelatex-specific package detected, using xelatex", logger.String("package", pkg))
+			return CompilerXeLaTeX
+		}
+	}
+
+	// Also check document class files (.cls) in the same directory
 	texDir := filepath.Dir(mainTexPath)
-	inputPattern := regexp.MustCompile(`\\(?:input|include)\{([^}]+)\}`)
-	matches := inputPattern.FindAllStringSubmatch(string(content), -1)
-
-	for _, match := range matches {
-		if len(match) < 2 {
-			continue
-		}
-
-		inputFile := match[1]
-		// Add .tex extension if not present
-		if !strings.HasSuffix(inputFile, ".tex") {
-			inputFile += ".tex"
-		}
-
-		// Try to find the file
-		inputPath := filepath.Join(texDir, inputFile)
-		if _, err := os.Stat(inputPath); os.IsNotExist(err) {
-			// Try in Tex subdirectory
-			inputPath = filepath.Join(texDir, "Tex", filepath.Base(inputFile))
-		}
-
-		// Read and check for Chinese
-		if inputContent, err := os.ReadFile(inputPath); err == nil {
-			if ContainsChinese(string(inputContent)) {
-				logger.Debug("Chinese detected in input file, using xelatex",
-					logger.String("file", inputPath))
-				return CompilerXeLaTeX
+	clsFiles, _ := filepath.Glob(filepath.Join(texDir, "*.cls"))
+	for _, clsFile := range clsFiles {
+		if clsContent, err := os.ReadFile(clsFile); err == nil {
+			clsStr := string(clsContent)
+			for _, pkg := range xelatexPackages {
+				if strings.Contains(clsStr, pkg) {
+					logger.Debug("xelatex-specific package detected in class file, using xelatex",
+						logger.String("classFile", clsFile),
+						logger.String("package", pkg))
+					return CompilerXeLaTeX
+				}
 			}
 		}
 	}
 
+	// Default to the configured compiler (usually pdflatex)
 	return c.compiler
 }
 
@@ -320,6 +350,20 @@ func (c *LaTeXCompiler) tryCompile(texPath string, outputDir string, compiler st
 		absOutputDir = texDir
 	}
 
+	// Create an empty .aux file in source directory if it doesn't exist
+	// This is needed because xelatex with -output-directory tries to read .aux from source dir at \end{document}
+	// Some packages like lastpage require this file to exist
+	if absOutputDir != texDir {
+		auxPath := filepath.Join(texDir, texBaseName+".aux")
+		if _, err := os.Stat(auxPath); os.IsNotExist(err) {
+			if err := os.WriteFile(auxPath, []byte("\\relax \n"), 0644); err != nil {
+				logger.Warn("failed to create empty .aux file", logger.Err(err))
+			} else {
+				logger.Debug("created empty .aux file in source directory")
+			}
+		}
+	}
+
 	var allLogs []string
 
 	// Check for missing .bib files and inline .bbl if available
@@ -351,18 +395,25 @@ func (c *LaTeXCompiler) tryCompile(texPath string, outputDir string, compiler st
 			if bblContent, err := os.ReadFile(originalBblPath); err == nil {
 				// Read the tex file content
 				if texContent, err := os.ReadFile(absTexPath); err == nil {
-					// Inline the bibliography: replace \bibliography{...} with the .bbl content
-					inlinedContent, wasInlined := inlineBibliography(string(texContent), string(bblContent))
-					if wasInlined {
-						// Write back the modified tex file
-						if err := os.WriteFile(absTexPath, []byte(inlinedContent), 0644); err != nil {
-							logger.Warn("failed to write inlined bibliography", logger.Err(err))
-						} else {
-							logger.Info("inlined bibliography into translated document",
-								logger.String("texPath", absTexPath),
-								logger.Int64("bblSize", originalBblInfo.Size()))
-							// Skip bibtex since we've inlined the bibliography
-							skipBibtex = true
+					// Check if the file already has thebibliography environment
+					// If so, don't inline again to avoid duplicates
+					if strings.Contains(string(texContent), `\begin{thebibliography}`) {
+						logger.Debug("skipping bibliography inlining - file already has thebibliography environment",
+							logger.String("texPath", absTexPath))
+					} else {
+						// Inline the bibliography: replace \bibliography{...} with the .bbl content
+						inlinedContent, wasInlined := inlineBibliography(string(texContent), string(bblContent))
+						if wasInlined {
+							// Write back the modified tex file
+							if err := os.WriteFile(absTexPath, []byte(inlinedContent), 0644); err != nil {
+								logger.Warn("failed to write inlined bibliography", logger.Err(err))
+							} else {
+								logger.Info("inlined bibliography into translated document",
+									logger.String("texPath", absTexPath),
+									logger.Int64("bblSize", originalBblInfo.Size()))
+								// Skip bibtex since we've inlined the bibliography
+								skipBibtex = true
+							}
 						}
 					}
 				}
@@ -377,6 +428,20 @@ func (c *LaTeXCompiler) tryCompile(texPath string, outputDir string, compiler st
 	if err != nil {
 		// Continue even if first pass has errors - we still want to try bibtex
 		logger.Warn("first pass had errors, continuing", logger.Err(err))
+	}
+
+	// Copy .aux file from output directory to source directory
+	// This is needed because xelatex with -output-directory tries to read .aux from source dir at \end{document}
+	if absOutputDir != texDir {
+		auxSrc := filepath.Join(absOutputDir, texBaseName+".aux")
+		auxDst := filepath.Join(texDir, texBaseName+".aux")
+		if auxContent, err := os.ReadFile(auxSrc); err == nil {
+			if err := os.WriteFile(auxDst, auxContent, 0644); err != nil {
+				logger.Warn("failed to copy .aux file to source directory", logger.Err(err))
+			} else {
+				logger.Debug("copied .aux file to source directory")
+			}
+		}
 	}
 
 	// Check if there's a .bib file or bibliography commands
@@ -408,11 +473,15 @@ func (c *LaTeXCompiler) tryCompile(texPath string, outputDir string, compiler st
 		logger.Debug("second compilation pass")
 		log2, _ := c.runCompiler(compiler, texFileName, texDir, absOutputDir)
 		allLogs = append(allLogs, "=== Second Pass ===", log2)
+		// Copy .aux file after second pass
+		copyAuxFile(absOutputDir, texDir, texBaseName)
 
 		// Third pass: resolve cross-references
 		logger.Debug("third compilation pass")
 		log3, _ := c.runCompiler(compiler, texFileName, texDir, absOutputDir)
 		allLogs = append(allLogs, "=== Third Pass ===", log3)
+		// Copy .aux file after third pass
+		copyAuxFile(absOutputDir, texDir, texBaseName)
 	} else if skipBibtex {
 		// We have a pre-existing .bbl file (from original document), run additional passes to resolve citations
 		logger.Debug("using pre-existing .bbl file, running additional compilation passes")
@@ -421,16 +490,22 @@ func (c *LaTeXCompiler) tryCompile(texPath string, outputDir string, compiler st
 		logger.Debug("second compilation pass")
 		log2, _ := c.runCompiler(compiler, texFileName, texDir, absOutputDir)
 		allLogs = append(allLogs, "=== Second Pass ===", log2)
+		// Copy .aux file after second pass
+		copyAuxFile(absOutputDir, texDir, texBaseName)
 
 		// Third pass: resolve cross-references
 		logger.Debug("third compilation pass")
 		log3, _ := c.runCompiler(compiler, texFileName, texDir, absOutputDir)
 		allLogs = append(allLogs, "=== Third Pass ===", log3)
+		// Copy .aux file after third pass
+		copyAuxFile(absOutputDir, texDir, texBaseName)
 	} else {
 		// Just run a second pass for cross-references
 		logger.Debug("second compilation pass (no bibtex needed)")
 		log2, _ := c.runCompiler(compiler, texFileName, texDir, absOutputDir)
 		allLogs = append(allLogs, "=== Second Pass ===", log2)
+		// Copy .aux file after second pass
+		copyAuxFile(absOutputDir, texDir, texBaseName)
 	}
 
 	// Combine all logs
@@ -548,6 +623,21 @@ func (c *LaTeXCompiler) runBibtex(baseName string, texDir string, outputDir stri
 	return log, err
 }
 
+// copyAuxFile copies the .aux file from output directory to source directory
+// This is needed because xelatex with -output-directory tries to read .aux from source dir at \end{document}
+func copyAuxFile(outputDir, texDir, baseName string) {
+	if outputDir == texDir {
+		return
+	}
+	auxSrc := filepath.Join(outputDir, baseName+".aux")
+	auxDst := filepath.Join(texDir, baseName+".aux")
+	if auxContent, err := os.ReadFile(auxSrc); err == nil {
+		if err := os.WriteFile(auxDst, auxContent, 0644); err != nil {
+			logger.Warn("failed to copy .aux file to source directory", logger.Err(err))
+		}
+	}
+}
+
 // checkNeedsBibtex checks if bibtex needs to be run by looking for \citation commands in .aux file
 // or .bib files in the source directory
 func (c *LaTeXCompiler) checkNeedsBibtex(auxPath string, texDir string) bool {
@@ -634,12 +724,33 @@ func (c *LaTeXCompiler) SetTimeout(timeout time.Duration) {
 // It also fixes compatibility issues with xelatex by redefining problematic commands.
 // Returns the modified content and a boolean indicating if the replacement was made.
 func inlineBibliography(texContent string, bblContent string) (string, bool) {
-	// Pattern to match \bibliography{...} command
+	// Check if the file already has thebibliography environment
+	// If so, don't inline again to avoid duplicates
+	if strings.Contains(texContent, `\begin{thebibliography}`) {
+		logger.Debug("skipping inlineBibliography - file already has thebibliography environment")
+		return texContent, false
+	}
+
+	// Pattern to match \bibliography{...} command (only non-commented lines)
 	// This matches \bibliography{refs} or \bibliography{refs,other} etc.
-	bibPattern := regexp.MustCompile(`\\bibliography\{[^}]+\}[^\n]*`)
+	// Use multiline mode to ensure we only match lines that don't start with %
+	bibPattern := regexp.MustCompile(`(?m)^([^%\n]*)\\bibliography\{[^}]+\}[^\n]*`)
 
 	if !bibPattern.MatchString(texContent) {
 		return texContent, false
+	}
+
+	// Check if the \bibliography command is in the preamble (before \begin{document})
+	// If so, skip inlining to avoid putting thebibliography in the preamble
+	beginDocIdx := strings.Index(texContent, `\begin{document}`)
+	if beginDocIdx != -1 {
+		match := bibPattern.FindStringIndex(texContent)
+		if match != nil && match[0] < beginDocIdx {
+			logger.Debug("skipping inlineBibliography - \\bibliography is in preamble",
+				logger.Int("bibIdx", match[0]),
+				logger.Int("beginDocIdx", beginDocIdx))
+			return texContent, false
+		}
 	}
 
 	// Fix xelatex compatibility issues in the .bbl content
@@ -649,9 +760,8 @@ func inlineBibliography(texContent string, bblContent string) (string, bool) {
 
 	// Replace \bibliography{...} with the fixed .bbl content
 	// The .bbl file contains the \begin{thebibliography}...\end{thebibliography} environment
-	// Use ReplaceAllLiteralString to avoid interpreting $ as regex backreference
-	// (LaTeX math mode uses $ which would cause issues with ReplaceAllString)
-	result := bibPattern.ReplaceAllLiteralString(texContent, fixedBblContent)
+	// Preserve any content before \bibliography on the same line (captured in $1)
+	result := bibPattern.ReplaceAllString(texContent, "${1}"+fixedBblContent)
 
 	logger.Debug("inlined bibliography content",
 		logger.Int("bblLength", len(fixedBblContent)))
@@ -698,13 +808,35 @@ func fixBblForXelatex(bblContent string) string {
 // This handles cases where arXiv source only includes pre-compiled .bbl but tex references .bib.
 // Returns the modified content and a boolean indicating if any fix was applied.
 func fixMissingBibFile(texContent string, texDir string, texBaseName string) (string, bool) {
+	// Check if the file already has thebibliography environment
+	// If so, don't inline again to avoid duplicates
+	if strings.Contains(texContent, `\begin{thebibliography}`) {
+		logger.Debug("skipping fixMissingBibFile - file already has thebibliography environment")
+		return texContent, false
+	}
+
 	// Pattern to match \bibliography{...} command and extract the bib file name(s)
-	bibPattern := regexp.MustCompile(`\\bibliography\{([^}]+)\}`)
+	// Use multiline mode to match only non-commented lines
+	// The pattern matches \bibliography{...} only if it's not preceded by % on the same line
+	bibPattern := regexp.MustCompile(`(?m)^[^%\n]*\\bibliography\{([^}]+)\}`)
 	matches := bibPattern.FindStringSubmatch(texContent)
 	
 	if len(matches) < 2 {
-		// No \bibliography command found
+		// No uncommented \bibliography command found
 		return texContent, false
+	}
+	
+	// Check if the \bibliography command is in the preamble (before \begin{document})
+	// If so, skip inlining to avoid putting thebibliography in the preamble
+	beginDocIdx := strings.Index(texContent, `\begin{document}`)
+	if beginDocIdx != -1 {
+		bibIdx := strings.Index(texContent, matches[0])
+		if bibIdx != -1 && bibIdx < beginDocIdx {
+			logger.Debug("skipping fixMissingBibFile - \\bibliography is in preamble",
+				logger.Int("bibIdx", bibIdx),
+				logger.Int("beginDocIdx", beginDocIdx))
+			return texContent, false
+		}
 	}
 	
 	// Extract bib file names (can be comma-separated)
@@ -905,36 +1037,13 @@ func (c *LaTeXCompiler) autoFixSyntax(texDir string) error {
 }
 
 // ensureChineseSupport ensures the document has proper Chinese support for xelatex
+// NOTE: This function is now disabled because automatically adding xeCJK can conflict
+// with existing document configurations. Documents that need Chinese support should
+// include it themselves.
 func (c *LaTeXCompiler) ensureChineseSupport(texPath string, content string) {
-	// Check if xeCJK is already included
-	if strings.Contains(content, "\\usepackage{xeCJK}") || strings.Contains(content, "\\usepackage{ctex}") {
-		logger.Debug("Chinese support already present")
-		return
-	}
-
-	// Find the position after \documentclass
-	docClassPattern := regexp.MustCompile(`\\documentclass(\[[^\]]*\])?\{[^}]+\}`)
-	loc := docClassPattern.FindStringIndex(content)
-	if loc == nil {
-		logger.Warn("could not find \\documentclass, skipping Chinese support injection")
-		return
-	}
-
-	// Insert xeCJK package after documentclass
-	insertPos := loc[1]
-	chineseSupport := `
-
-% 中文支持 (auto-added by latex-translator)
-\usepackage{xeCJK}
-\setCJKmainfont{SimSun}
-`
-
-	newContent := content[:insertPos] + chineseSupport + content[insertPos:]
-
-	// Write back
-	if err := os.WriteFile(texPath, []byte(newContent), 0644); err != nil {
-		logger.Warn("failed to add Chinese support", logger.Err(err))
-	} else {
-		logger.Info("added xeCJK support for Chinese characters")
-	}
+	// Disabled: automatically adding xeCJK can cause compilation failures
+	// when it conflicts with existing packages or document classes.
+	// The document should include its own Chinese support if needed.
+	logger.Debug("ensureChineseSupport is disabled to avoid conflicts")
+	return
 }

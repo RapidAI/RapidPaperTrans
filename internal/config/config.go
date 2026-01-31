@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"time"
 
 	"latex-translator/internal/logger"
 	"latex-translator/internal/types"
@@ -320,4 +321,82 @@ func (m *ConfigManager) GetLibraryPageSize() int {
 		return m.config.LibraryPageSize
 	}
 	return DefaultLibraryPageSize
+}
+
+// MaxHistoryItems is the maximum number of history items to keep
+const MaxHistoryItems = 50
+
+// GetInputHistory returns the input history list.
+func (m *ConfigManager) GetInputHistory() []types.InputHistoryItem {
+	if m.config != nil && m.config.InputHistory != nil {
+		return m.config.InputHistory
+	}
+	return []types.InputHistoryItem{}
+}
+
+// AddInputHistory adds an input to the history list.
+// It avoids duplicates and keeps the list within MaxHistoryItems.
+func (m *ConfigManager) AddInputHistory(input string, inputType string) {
+	if m.config == nil {
+		m.config = defaultConfig()
+	}
+	if m.config.InputHistory == nil {
+		m.config.InputHistory = []types.InputHistoryItem{}
+	}
+
+	// Remove existing entry with the same input (to move it to the top)
+	newHistory := []types.InputHistoryItem{}
+	for _, item := range m.config.InputHistory {
+		if item.Input != input {
+			newHistory = append(newHistory, item)
+		}
+	}
+
+	// Add new entry at the beginning
+	newItem := types.InputHistoryItem{
+		Input:     input,
+		Timestamp: currentTimeMillis(),
+		Type:      inputType,
+	}
+	m.config.InputHistory = append([]types.InputHistoryItem{newItem}, newHistory...)
+
+	// Trim to max items
+	if len(m.config.InputHistory) > MaxHistoryItems {
+		m.config.InputHistory = m.config.InputHistory[:MaxHistoryItems]
+	}
+
+	// Save silently
+	_ = m.Save()
+}
+
+// RemoveInputHistory removes a specific input from history.
+func (m *ConfigManager) RemoveInputHistory(input string) {
+	if m.config == nil || m.config.InputHistory == nil {
+		return
+	}
+
+	newHistory := []types.InputHistoryItem{}
+	for _, item := range m.config.InputHistory {
+		if item.Input != input {
+			newHistory = append(newHistory, item)
+		}
+	}
+	m.config.InputHistory = newHistory
+
+	// Save silently
+	_ = m.Save()
+}
+
+// ClearInputHistory clears all input history.
+func (m *ConfigManager) ClearInputHistory() {
+	if m.config == nil {
+		return
+	}
+	m.config.InputHistory = []types.InputHistoryItem{}
+	_ = m.Save()
+}
+
+// currentTimeMillis returns the current time in milliseconds.
+func currentTimeMillis() int64 {
+	return time.Now().UnixMilli()
 }

@@ -1,239 +1,314 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PDF Text Overlay Script
-使用 PyMuPDF (fitz) 精确覆盖 PDF 中的文本
+PDF translation overlay script using PyMuPDF.
+Can work in two modes:
+1. With pre-translated data (translations JSON)
+2. With API config (calls translation API directly)
+
+Based on: https://medium.com/@pymupdf/translating-pdfs-a-practical-pymupdf-guide-c1c54b024042
 """
 
 import sys
 import json
-import fitz  # PyMuPDF
+import os
+import re
+import hashlib
 
-
-def overlay_text_on_pdf(input_pdf, blocks_json, output_pdf):
-    """
-    在 PDF 上覆盖翻译文本
-    
-    Args:
-        input_pdf: 输入 PDF 路径
-        blocks_json: JSON 格式的文本块数据
-        output_pdf: 输出 PDF 路径
-    """
+try:
+    import pymupdf
+except ImportError:
     try:
-        # 解析 JSON 数据
-        blocks = json.loads(blocks_json)
-        
-        # 打开 PDF
-        doc = fitz.open(input_pdf)
-        
-        print(f"Original PDF has {len(doc)} pages")
-        
-        # 按页面分组文本块
-        page_blocks = {}
-        for block in blocks:
-            page_num = block['page']
-            if page_num not in page_blocks:
-                page_blocks[page_num] = []
-            page_blocks[page_num].append(block)
-        
-        print(f"Translation blocks cover {len(page_blocks)} pages")
-        
-        # 处理每一页 - 重要：遍历所有页面，而不仅仅是有翻译块的页面
-        for page_index in range(len(doc)):
-            page_num = page_index + 1  # 我们的页码从 1 开始
-            page = doc[page_index]
-            page_height = page.rect.height
-            
-            # 检查这一页是否有翻译块
-            blocks_on_page = page_blocks.get(page_num, [])
-            
-            if not blocks_on_page:
-                # 没有翻译块的页面，保持原样
-                print(f"Page {page_num}: No translation blocks, keeping original")
-                continue
-            
-            print(f"Page {page_num}: Processing {len(blocks_on_page)} translation blocks")
-            
-            # 处理该页的每个文本块
-            for block in blocks_on_page:
-                try:
-                    # 提取坐标和尺寸
-                    x = float(block['x'])
-                    y = float(block['y'])
-                    width = float(block['width'])
-                    height = float(block['height'])
-                    font_size = float(block.get('font_size', 10))
-                    translated_text = block['translated_text']
-                    
-                    if not translated_text:
-                        continue
-                    
-                    # PDF 坐标系统：原点在左下角，Y 轴向上
-                    # PyMuPDF 坐标系统：原点在左上角，Y 轴向下
-                    # 需要转换坐标
-                    y_top = page_height - y - height
-                    
-                    # 创建矩形区域（左上角坐标，右下角坐标）
-                    rect = fitz.Rect(x, y_top, x + width, y_top + height)
-                    
-                    # 1. 先画白色矩形覆盖原文
-                    # 扩大一点矩形确保完全覆盖
-                    cover_rect = fitz.Rect(
-                        rect.x0 - 2,
-                        rect.y0 - 2,
-                        rect.x1 + 2,
-                        rect.y1 + 2
-                    )
-                    page.draw_rect(cover_rect, color=None, fill=(1, 1, 1), overlay=True)
-                    
-                    # 2. 调整字体大小以适应中文
-                    # 中文字符通常比英文宽，需要适当缩小
-                    adjusted_font_size = adjust_font_size_for_chinese(
-                        translated_text, font_size, width, height
-                    )
-                    
-                    # 确保字体大小在合理范围内
-                    adjusted_font_size = max(5, min(adjusted_font_size, 14))
-                    
-                    # 3. 在白色矩形上添加中文文本
-                    # 使用内置的中文字体（如果系统有的话）
-                    try:
-                        # 尝试使用系统中文字体
-                        fontname = "china-ss"  # PyMuPDF 内置的简体中文字体
-                        
-                        # 插入文本，使用 textbox 方法自动换行
-                        rc = page.insert_textbox(
-                            rect,
-                            translated_text,
-                            fontsize=adjusted_font_size,
-                            fontname=fontname,
-                            fontfile=None,
-                            color=(0, 0, 0),  # 黑色文字
-                            align=fitz.TEXT_ALIGN_LEFT,
-                            overlay=True
-                        )
-                        
-                        # 如果文本溢出（rc < 0），尝试更小的字体
-                        if rc < 0:
-                            smaller_size = adjusted_font_size * 0.8
-                            if smaller_size >= 5:
-                                page.insert_textbox(
-                                    rect,
-                                    translated_text,
-                                    fontsize=smaller_size,
-                                    fontname=fontname,
-                                    fontfile=None,
-                                    color=(0, 0, 0),
-                                    align=fitz.TEXT_ALIGN_LEFT,
-                                    overlay=True
-                                )
-                    
-                    except Exception as font_error:
-                        # 如果中文字体失败，尝试使用默认字体
-                        print(f"Warning: Chinese font failed, using default: {font_error}")
-                        page.insert_textbox(
-                            rect,
-                            translated_text,
-                            fontsize=adjusted_font_size,
-                            fontname="helv",  # Helvetica 作为后备
-                            color=(0, 0, 0),
-                            align=fitz.TEXT_ALIGN_LEFT,
-                            overlay=True
-                        )
-                
-                except Exception as block_error:
-                    print(f"Error processing block on page {page_num}: {block_error}")
-                    continue
-        
-        # 保存修改后的 PDF
-        doc.save(output_pdf, garbage=4, deflate=True, clean=True)
-        doc.close()
-        
-        print(f"Successfully created overlay PDF with {len(doc)} pages: {output_pdf}")
+        import fitz as pymupdf
+    except ImportError:
+        print("Error: PyMuPDF not installed. Install with: pip install PyMuPDF")
+        sys.exit(1)
+
+WHITE = pymupdf.pdfcolor["white"]
+
+
+def is_formula(text):
+    """Check if text is a mathematical formula"""
+    # Strong math symbols that clearly indicate formulas
+    strong_math_symbols = "∫∑∏√∂∇"
+    
+    # Check for strong math symbols
+    if any(c in text for c in strong_math_symbols):
         return True
     
-    except Exception as e:
-        print(f"Error in overlay_text_on_pdf: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+    # Check for LaTeX commands
+    if re.search(r'\\[a-zA-Z]+', text):
+        return True
+    
+    # Pattern like (5) or (A.1) at end - equation number (only if short)
+    if re.search(r'^\s*\(\d+\)\s*$|^\s*\([A-Z]\.\d+\)\s*$', text.strip()):
+        return True
+    
+    # Check for subscript/superscript patterns (but only if text is short and has many)
+    if len(text) < 50:
+        subscript_count = len(re.findall(r'[a-zA-Z][_^]\d', text))
+        if subscript_count > 2:
+            return True
+    
+    # Count math-related characters (but be more lenient)
+    math_symbols = "±×÷≤≥≠≈∞∈∉⊂⊃∪∩∧∨¬∀∃αβγδεζηθικλμνξοπρστυφχψωΓΔΘΛΞΠΣΦΨΩ"
+    math_count = sum(1 for c in text if c in math_symbols)
+    
+    # Only mark as formula if more than 40% are special math symbols
+    if len(text) > 0 and math_count / len(text) > 0.4:
+        return True
+    
+    return False
+
+
+def is_line_number(text):
+    """Check if text is just line numbers"""
+    lines = text.strip().split('\n')
+    if len(lines) < 3:
         return False
+    
+    number_lines = sum(1 for line in lines if line.strip().isdigit())
+    return number_lines / len(lines) > 0.7
 
 
-def adjust_font_size_for_chinese(text, original_size, max_width, max_height):
+def should_translate(text):
+    """Determine if text should be translated"""
+    text = text.strip()
+    
+    if not text or len(text) < 3:
+        return False
+    
+    if is_line_number(text):
+        return False
+    
+    if is_formula(text):
+        return False
+    
+    # Skip if mostly numbers/symbols
+    alpha_count = sum(1 for c in text if c.isalpha())
+    if len(text) > 0 and alpha_count / len(text) < 0.3:
+        return False
+    
+    return True
+
+
+class TranslationCache:
+    """Simple file-based translation cache"""
+    def __init__(self, cache_path=None):
+        self.cache_path = cache_path
+        self.cache = {}
+        if cache_path:
+            self.load()
+    
+    def load(self):
+        if self.cache_path and os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, 'r', encoding='utf-8') as f:
+                    self.cache = json.load(f)
+            except:
+                self.cache = {}
+    
+    def save(self):
+        if self.cache_path:
+            with open(self.cache_path, 'w', encoding='utf-8') as f:
+                json.dump(self.cache, f, ensure_ascii=False, indent=2)
+    
+    def get(self, text):
+        key = hashlib.md5(text.encode()).hexdigest()
+        return self.cache.get(key)
+    
+    def set(self, text, translation):
+        key = hashlib.md5(text.encode()).hexdigest()
+        self.cache[key] = translation
+    
+    def load_from_translations(self, translations):
+        """Load translations from JSON array"""
+        for t in translations:
+            orig_text = t.get('text', '').strip()
+            trans_text = t.get('translated_text', '').strip()
+            if orig_text and trans_text:
+                self.set(orig_text, trans_text)
+
+
+def translate_text_api(text, api_key, base_url, model):
+    """Translate text using OpenAI-compatible API"""
+    try:
+        import requests
+    except ImportError:
+        print("Warning: requests not installed, cannot call API")
+        return None
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    prompt = f"""Translate the following English text to Chinese. 
+Keep any technical terms, formulas, or proper nouns unchanged.
+Only output the translation, nothing else.
+
+Text to translate:
+{text}"""
+    
+    data = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ]
+    }
+    
+    try:
+        response = requests.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json=data,
+            timeout=60
+        )
+        response.raise_for_status()
+        result = response.json()
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"Translation API error: {e}")
+        return None
+
+
+def overlay_translations(original_pdf, translations_source, output_pdf, 
+                         api_key=None, base_url=None, model=None, cache_path=None):
     """
-    根据中文文本调整字体大小
+    Overlay translations on PDF.
     
     Args:
-        text: 文本内容
-        original_size: 原始字体大小
-        max_width: 最大宽度
-        max_height: 最大高度
-    
-    Returns:
-        调整后的字体大小
+        original_pdf: Path to original PDF
+        translations_source: Path to JSON file with translations, or None to use API
+        output_pdf: Path to output PDF
+        api_key: API key for translation (optional)
+        base_url: API base URL (optional)
+        model: Model name (optional)
+        cache_path: Path to cache file (optional)
     """
-    if max_width <= 0 or max_height <= 0:
-        return original_size
+    # Setup cache
+    cache = TranslationCache(cache_path)
     
-    # 统计中文和英文字符数量
-    chinese_count = 0
-    latin_count = 0
+    # Load pre-translated data if provided
+    if translations_source and os.path.isfile(translations_source):
+        with open(translations_source, 'r', encoding='utf-8') as f:
+            translations = json.load(f)
+        cache.load_from_translations(translations)
+        print(f"Loaded {len(translations)} pre-translated blocks")
     
-    for char in text:
-        if '\u4e00' <= char <= '\u9fff':  # 中文字符范围
-            chinese_count += 1
-        elif char.isalpha():
-            latin_count += 1
+    use_api = api_key and base_url and model
     
-    total_chars = chinese_count + latin_count
-    if total_chars == 0:
-        return original_size
+    doc = pymupdf.open(original_pdf)
+    blocks_processed = 0
+    blocks_skipped = 0
+    blocks_from_cache = 0
+    blocks_from_api = 0
     
-    # 估算文本宽度
-    # 中文字符宽度约等于字体大小
-    # 英文字符宽度约为字体大小的 0.5 倍
-    estimated_width = chinese_count * original_size + latin_count * original_size * 0.5
+    print(f"Processing {len(doc)} pages...")
     
-    # 如果文本宽度超出，按比例缩小
-    if estimated_width > max_width:
-        scale_factor = max_width / estimated_width
-        adjusted_size = original_size * scale_factor
+    for page_num in range(len(doc)):
+        page = doc[page_num]
         
-        # 考虑多行的情况
-        # 如果缩小后的字体太小，可能需要多行显示
-        if adjusted_size < 6:
-            # 计算需要多少行
-            lines_needed = estimated_width / max_width
-            line_height = original_size * 1.2
+        # Extract text blocks using PyMuPDF
+        blocks = page.get_text("blocks", flags=pymupdf.TEXT_DEHYPHENATE)
+        
+        for block in blocks:
+            if len(block) < 5:
+                continue
             
-            # 检查是否有足够的高度容纳多行
-            if lines_needed * line_height <= max_height:
-                # 可以多行显示，使用稍大的字体
-                adjusted_size = min(original_size, max_height / (lines_needed * 1.2))
-            else:
-                # 高度不够，只能用小字体
-                adjusted_size = 6
+            bbox = block[:4]
+            text = block[4] if isinstance(block[4], str) else ""
+            text = text.strip()
+            
+            if not should_translate(text):
+                blocks_skipped += 1
+                continue
+            
+            # Try to get translation from cache
+            translation = cache.get(text)
+            
+            if translation:
+                blocks_from_cache += 1
+            elif use_api:
+                # Call API for translation
+                translation = translate_text_api(text, api_key, base_url, model)
+                if translation:
+                    cache.set(text, translation)
+                    blocks_from_api += 1
+            
+            if not translation:
+                continue
+            
+            # Apply translation
+            rect = pymupdf.Rect(bbox)
+            
+            # Cover original text with white
+            page.draw_rect(rect, color=None, fill=WHITE)
+            
+            # Insert translation using htmlbox
+            page.insert_htmlbox(rect, translation)
+            blocks_processed += 1
         
-        return adjusted_size
+        print(f"  Page {page_num + 1}: done")
     
-    return original_size
+    # Save cache
+    cache.save()
+    
+    # Optimize and save
+    try:
+        doc.subset_fonts()
+    except:
+        pass
+    
+    doc.ez_save(output_pdf)
+    doc.close()
+    
+    print(f"\n=== Translation Complete ===")
+    print(f"Processed: {blocks_processed} blocks")
+    print(f"From cache: {blocks_from_cache}")
+    print(f"From API: {blocks_from_api}")
+    print(f"Skipped: {blocks_skipped} (formula/symbol)")
+    print(f"Output: {output_pdf}")
+    return True
 
 
 def main():
-    """主函数"""
-    if len(sys.argv) != 4:
-        print("Usage: python overlay_pdf.py <input_pdf> <blocks_json> <output_pdf>")
+    if len(sys.argv) < 4:
+        print("Usage: overlay_pdf.py <original_pdf> <translations_json> <output_pdf>")
+        print("")
+        print("Or with API (set environment variables):")
+        print("  OPENAI_API_KEY  - API key")
+        print("  OPENAI_BASE_URL - API base URL")
+        print("  OPENAI_MODEL    - Model name")
         sys.exit(1)
     
-    input_pdf = sys.argv[1]
-    blocks_json = sys.argv[2]
+    original_pdf = sys.argv[1]
+    translations_json = sys.argv[2]
     output_pdf = sys.argv[3]
     
-    success = overlay_text_on_pdf(input_pdf, blocks_json, output_pdf)
+    # Check for API config in environment
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    model = os.environ.get("OPENAI_MODEL")
     
-    if not success:
+    # Cache path (same directory as output)
+    cache_path = os.path.splitext(output_pdf)[0] + "_cache.json"
+    
+    if not os.path.exists(original_pdf):
+        print(f"Error: Original PDF not found: {original_pdf}")
         sys.exit(1)
+    
+    success = overlay_translations(
+        original_pdf, 
+        translations_json, 
+        output_pdf,
+        api_key=api_key,
+        base_url=base_url,
+        model=model,
+        cache_path=cache_path
+    )
+    sys.exit(0 if success else 1)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

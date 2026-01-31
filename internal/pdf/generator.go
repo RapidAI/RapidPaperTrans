@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"latex-translator/internal/logger"
+	"latex-translator/internal/python"
 
 	ledongthucpdf "github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -90,7 +91,19 @@ func (g *PDFGenerator) GeneratePDF(originalPath string, blocks []TranslatedBlock
 		return nil
 	}
 
-	// 方案1: 优先使用 Python + PyMuPDF 方案（最精确）
+	// 方案0: 优先使用 Go MuPDF 绑定（如果可用）
+	if IsMuPDFAvailable() {
+		fmt.Println("正在使用 Go MuPDF 绑定覆盖文本...")
+		mupdfGen := NewMuPDFGenerator(g.workDir)
+		if err := mupdfGen.GenerateTranslatedPDF(originalPath, blocks, outputPath); err != nil {
+			fmt.Printf("Warning: Go MuPDF failed: %v\n", err)
+		} else {
+			// MuPDF succeeded, skip other methods
+			goto verifyOutput
+		}
+	}
+
+	// 方案1: 使用 Python + PyMuPDF 方案
 	fmt.Println("正在使用 Python + PyMuPDF 方法覆盖文本...")
 	if err := g.generatePythonOverlayPDF(originalPath, blocks, outputPath); err != nil {
 		fmt.Printf("Warning: Python overlay failed: %v\n", err)
@@ -106,12 +119,14 @@ func (g *PDFGenerator) GeneratePDF(originalPath string, blocks []TranslatedBlock
 			if err := g.generateOverlayPDF(originalPath, blocks, outputPath); err != nil {
 				fmt.Printf("Warning: LaTeX overlay also failed: %v\n", err)
 				fmt.Println("Falling back to copying original PDF...")
-				fmt.Println("Note: Python (PyMuPDF) or LaTeX (xelatex) must be installed for PDF overlay to work.")
+				fmt.Println("Note: Build with -tags mupdf, or install Python (PyMuPDF) or LaTeX (xelatex)")
 				fmt.Println("Install PyMuPDF: pip install PyMuPDF")
 				return g.copyFile(originalPath, outputPath)
 			}
 		}
 	}
+
+verifyOutput:
 
 	// Verify the output file was created and has content
 	fileInfo, err := os.Stat(outputPath)
@@ -121,6 +136,41 @@ func (g *PDFGenerator) GeneratePDF(originalPath string, blocks []TranslatedBlock
 
 	if fileInfo.Size() == 0 {
 		return NewPDFError(ErrGenerateFailed, "生成的 PDF 文件为空", nil)
+	}
+
+	// 验证页数是否一致
+	originalPageCount, err := g.getPDFPageCount(originalPath)
+	if err != nil {
+		// 尝试使用 ledongthuc/pdf
+		originalPageCount, err = g.getPDFPageCountWithLedongthuc(originalPath)
+		if err != nil {
+			logger.Warn("无法获取原始 PDF 页数进行验证", logger.Err(err))
+			return nil // 不阻止生成，只是警告
+		}
+	}
+
+	outputPageCount, err := g.getPDFPageCount(outputPath)
+	if err != nil {
+		// 尝试使用 ledongthuc/pdf
+		outputPageCount, err = g.getPDFPageCountWithLedongthuc(outputPath)
+		if err != nil {
+			logger.Warn("无法获取输出 PDF 页数进行验证", logger.Err(err))
+			return nil // 不阻止生成，只是警告
+		}
+	}
+
+	if originalPageCount != outputPageCount {
+		logger.Warn("翻译后 PDF 页数与原始 PDF 不一致",
+			logger.Int("originalPages", originalPageCount),
+			logger.Int("outputPages", outputPageCount))
+		
+		// 如果页数差异超过 15%，返回错误
+		diffPercent := float64(originalPageCount-outputPageCount) / float64(originalPageCount)
+		if diffPercent > 0.15 {
+			return NewPDFError(ErrGenerateFailed, 
+				fmt.Sprintf("翻译后 PDF 页数(%d)与原始 PDF(%d)差异过大(%.1f%%)，可能存在内容丢失", 
+					outputPageCount, originalPageCount, diffPercent*100), nil)
+		}
 	}
 
 	return nil
@@ -250,6 +300,15 @@ func (g *PDFGenerator) generateImprovedOverlayLatexWithPath(originalPDF string, 
 				logger.Int("pageCount", pageCount),
 				logger.String("path", fullPath))
 		}
+		// 如果 pdfcpu 失败，尝试 ledongthuc/pdf
+		if maxPage == 0 {
+			if pageCount, err := g.getPDFPageCountWithLedongthuc(fullPath); err == nil && pageCount > 0 {
+				maxPage = pageCount
+				logger.Info("got page count from full path (ledongthuc)",
+					logger.Int("pageCount", pageCount),
+					logger.String("path", fullPath))
+			}
+		}
 	}
 	
 	// 如果完整路径失败，尝试相对路径
@@ -263,10 +322,25 @@ func (g *PDFGenerator) generateImprovedOverlayLatexWithPath(originalPDF string, 
 			possiblePaths = append(possiblePaths, filepath.Join(g.workDir, originalPDF))
 		}
 		
+		// 也尝试当前目录
+		if !filepath.IsAbs(originalPDF) {
+			if cwd, err := os.Getwd(); err == nil {
+				possiblePaths = append(possiblePaths, filepath.Join(cwd, originalPDF))
+			}
+		}
+		
 		for _, path := range possiblePaths {
 			if pageCount, err := g.getPDFPageCount(path); err == nil && pageCount > 0 {
 				maxPage = pageCount
 				logger.Info("got page count from path",
+					logger.Int("pageCount", pageCount),
+					logger.String("path", path))
+				break
+			}
+			// 尝试 ledongthuc/pdf
+			if pageCount, err := g.getPDFPageCountWithLedongthuc(path); err == nil && pageCount > 0 {
+				maxPage = pageCount
+				logger.Info("got page count from path (ledongthuc)",
 					logger.Int("pageCount", pageCount),
 					logger.String("path", path))
 				break
@@ -2180,23 +2254,28 @@ func (g *PDFGenerator) getPDFPageCount(pdfPath string) (int, error) {
 // generatePythonOverlayPDF generates a PDF with Chinese text overlaid using Python
 // 使用 PyMuPDF 的 redaction 功能完全删除原文并添加翻译
 func (g *PDFGenerator) generatePythonOverlayPDF(originalPath string, blocks []TranslatedBlock, outputPath string) error {
-	// 创建临时翻译缓存文件
-	cacheFile, err := g.createTranslationCache(blocks)
-	if err != nil {
-		return fmt.Errorf("failed to create translation cache: %v", err)
+	// Ensure Python environment is set up with required packages
+	fmt.Println("正在检查 Python 环境...")
+	if err := python.EnsureGlobalEnv(func(msg string) {
+		fmt.Println(msg)
+	}); err != nil {
+		return fmt.Errorf("failed to setup Python environment: %w", err)
 	}
-	defer os.Remove(cacheFile)
-	
+
+	// Get Python path from our managed environment
+	pythonPath := python.GetPythonPath()
+	if pythonPath == "" {
+		return fmt.Errorf("Python environment not ready")
+	}
+
 	// Find Python script - look in multiple possible locations
 	possiblePaths := []string{
-		filepath.Join("scripts", "pdf_translate.py"),
-		filepath.Join("latex-translator", "scripts", "pdf_translate.py"),
-		filepath.Join("..", "..", "scripts", "pdf_translate.py"),
-		filepath.Join("scripts", "translate_pdf_final.py"),
-		filepath.Join("latex-translator", "scripts", "translate_pdf_final.py"),
 		filepath.Join("internal", "pdf", "overlay_pdf.py"),
+		filepath.Join("scripts", "pdf_translate.py"),
 		filepath.Join("latex-translator", "internal", "pdf", "overlay_pdf.py"),
-		"overlay_pdf.py",
+		filepath.Join("latex-translator", "scripts", "pdf_translate.py"),
+		filepath.Join("..", "..", "internal", "pdf", "overlay_pdf.py"),
+		filepath.Join("..", "..", "scripts", "pdf_translate.py"),
 	}
 	
 	scriptPath := ""
@@ -2211,20 +2290,32 @@ func (g *PDFGenerator) generatePythonOverlayPDF(originalPath string, blocks []Tr
 		return fmt.Errorf("Python script not found in any of the expected locations")
 	}
 	
-	// 检查是否是新版本脚本（使用翻译缓存文件）
-	isNewScript := strings.Contains(scriptPath, "pdf_translate.py") || strings.Contains(scriptPath, "translate_pdf_final.py")
+	// Create blocks JSON file
+	blocksFile, err := g.createBlocksJSONFile(blocks)
+	if err != nil {
+		return fmt.Errorf("failed to create blocks JSON file: %v", err)
+	}
+	defer os.Remove(blocksFile)
+	
+	// Check which script we're using
+	isOverlayScript := strings.Contains(scriptPath, "overlay_pdf.py")
+	isPdfTranslateScript := strings.Contains(scriptPath, "pdf_translate.py")
 	
 	var cmd *exec.Cmd
-	if isNewScript {
-		// 新版本：使用翻译缓存文件
-		cmd = exec.Command("python", scriptPath, originalPath, cacheFile, outputPath)
-	} else {
-		// 旧版本：使用 blocks JSON
-		blocksJSON, err := g.blocksToJSON(blocks)
+	if isOverlayScript {
+		// New overlay_pdf.py script - uses blocks JSON file directly
+		cmd = exec.Command(pythonPath, scriptPath, originalPath, blocksFile, outputPath)
+	} else if isPdfTranslateScript {
+		// pdf_translate.py - uses translation cache file
+		cacheFile, err := g.createTranslationCache(blocks)
 		if err != nil {
-			return fmt.Errorf("failed to convert blocks to JSON: %v", err)
+			return fmt.Errorf("failed to create translation cache: %v", err)
 		}
-		cmd = exec.Command("python", scriptPath, originalPath, blocksJSON, outputPath)
+		defer os.Remove(cacheFile)
+		cmd = exec.Command(pythonPath, scriptPath, originalPath, cacheFile, outputPath)
+	} else {
+		// Fallback - try with blocks JSON
+		cmd = exec.Command(pythonPath, scriptPath, originalPath, blocksFile, outputPath)
 	}
 	
 	hideWindowOnWindows(cmd)
@@ -2236,6 +2327,60 @@ func (g *PDFGenerator) generatePythonOverlayPDF(originalPath string, blocks []Tr
 	
 	fmt.Printf("Python overlay output: %s\n", string(output))
 	return nil
+}
+
+// createBlocksJSONFile creates a temporary JSON file with block data
+func (g *PDFGenerator) createBlocksJSONFile(blocks []TranslatedBlock) (string, error) {
+	type BlockJSON struct {
+		Page           int     `json:"page"`
+		X              float64 `json:"x"`
+		Y              float64 `json:"y"`
+		Width          float64 `json:"width"`
+		Height         float64 `json:"height"`
+		FontSize       float64 `json:"font_size"`
+		BlockType      string  `json:"block_type"`
+		Text           string  `json:"text"`
+		TranslatedText string  `json:"translated_text"`
+	}
+	
+	jsonBlocks := make([]BlockJSON, 0, len(blocks))
+	for _, block := range blocks {
+		// Skip blocks without translation
+		if block.TranslatedText == "" {
+			continue
+		}
+		// Skip formula blocks - they should not be translated/overlaid
+		if block.BlockType == "formula" {
+			continue
+		}
+		jsonBlocks = append(jsonBlocks, BlockJSON{
+			Page:           block.Page,
+			X:              block.X,
+			Y:              block.Y,
+			Width:          block.Width,
+			Height:         block.Height,
+			FontSize:       block.FontSize,
+			BlockType:      block.BlockType,
+			Text:           block.Text,
+			TranslatedText: block.TranslatedText,
+		})
+	}
+	
+	// Create temp file
+	tmpFile, err := os.CreateTemp("", "blocks_*.json")
+	if err != nil {
+		return "", err
+	}
+	defer tmpFile.Close()
+	
+	encoder := json.NewEncoder(tmpFile)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(jsonBlocks); err != nil {
+		os.Remove(tmpFile.Name())
+		return "", err
+	}
+	
+	return tmpFile.Name(), nil
 }
 
 // createTranslationCache creates a temporary translation cache file from blocks

@@ -212,6 +212,24 @@ export namespace main {
 	        this.authors = source["authors"];
 	    }
 	}
+	export class DownloadAndOpenResult {
+	    success: boolean;
+	    chinese_path?: string;
+	    bilingual_path?: string;
+	    message?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DownloadAndOpenResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.chinese_path = source["chinese_path"];
+	        this.bilingual_path = source["bilingual_path"];
+	        this.message = source["message"];
+	    }
+	}
 	export class PaperListItem {
 	    arxiv_id: string;
 	    title: string;
@@ -291,6 +309,90 @@ export namespace main {
 
 export namespace pdf {
 	
+	export class PageCountResult {
+	    original_pages: number;
+	    translated_pages: number;
+	    difference: number;
+	    diff_percent: number;
+	    is_suspicious: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new PageCountResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.original_pages = source["original_pages"];
+	        this.translated_pages = source["translated_pages"];
+	        this.difference = source["difference"];
+	        this.diff_percent = source["diff_percent"];
+	        this.is_suspicious = source["is_suspicious"];
+	    }
+	}
+	export class SectionInfo {
+	    type: string;
+	    number: string;
+	    title: string;
+	    page: number;
+	    level: number;
+	    is_appendix: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SectionInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.type = source["type"];
+	        this.number = source["number"];
+	        this.title = source["title"];
+	        this.page = source["page"];
+	        this.level = source["level"];
+	        this.is_appendix = source["is_appendix"];
+	    }
+	}
+	export class ContentValidationResult {
+	    is_complete: boolean;
+	    original_sections: SectionInfo[];
+	    translated_sections: SectionInfo[];
+	    missing_sections: SectionInfo[];
+	    warnings: string[];
+	    page_count_result?: PageCountResult;
+	    score: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new ContentValidationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.is_complete = source["is_complete"];
+	        this.original_sections = this.convertValues(source["original_sections"], SectionInfo);
+	        this.translated_sections = this.convertValues(source["translated_sections"], SectionInfo);
+	        this.missing_sections = this.convertValues(source["missing_sections"], SectionInfo);
+	        this.warnings = source["warnings"];
+	        this.page_count_result = this.convertValues(source["page_count_result"], PageCountResult);
+	        this.score = source["score"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
 	export class PDFInfo {
 	    file_path: string;
 	    file_name: string;
@@ -335,6 +437,8 @@ export namespace pdf {
 	        this.error = source["error"];
 	    }
 	}
+	
+	
 	export class TranslationResult {
 	    original_pdf_path: string;
 	    translated_pdf_path: string;
@@ -342,6 +446,8 @@ export namespace pdf {
 	    translated_blocks: number;
 	    cached_blocks: number;
 	    tokens_used: number;
+	    page_count_result?: PageCountResult;
+	    content_validation?: ContentValidationResult;
 	
 	    static createFrom(source: any = {}) {
 	        return new TranslationResult(source);
@@ -355,7 +461,27 @@ export namespace pdf {
 	        this.translated_blocks = source["translated_blocks"];
 	        this.cached_blocks = source["cached_blocks"];
 	        this.tokens_used = source["tokens_used"];
+	        this.page_count_result = this.convertValues(source["page_count_result"], PageCountResult);
+	        this.content_validation = this.convertValues(source["content_validation"], ContentValidationResult);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }
@@ -483,6 +609,22 @@ export namespace translator {
 
 export namespace types {
 	
+	export class InputHistoryItem {
+	    input: string;
+	    timestamp: number;
+	    type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new InputHistoryItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.input = source["input"];
+	        this.timestamp = source["timestamp"];
+	        this.type = source["type"];
+	    }
+	}
 	export class Config {
 	    openai_api_key: string;
 	    openai_base_url: string;
@@ -491,6 +633,7 @@ export namespace types {
 	    default_compiler: string;
 	    work_directory: string;
 	    last_input: string;
+	    input_history: InputHistoryItem[];
 	    concurrency: number;
 	    github_token: string;
 	    github_owner: string;
@@ -511,6 +654,7 @@ export namespace types {
 	        this.default_compiler = source["default_compiler"];
 	        this.work_directory = source["work_directory"];
 	        this.last_input = source["last_input"];
+	        this.input_history = this.convertValues(source["input_history"], InputHistoryItem);
 	        this.concurrency = source["concurrency"];
 	        this.github_token = source["github_token"];
 	        this.github_owner = source["github_owner"];
@@ -518,7 +662,26 @@ export namespace types {
 	        this.library_page_size = source["library_page_size"];
 	        this.share_prompt_enabled = source["share_prompt_enabled"];
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
+	
 	export class PaperCategory {
 	    id: string;
 	    name: string;

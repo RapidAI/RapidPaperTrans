@@ -78,9 +78,14 @@ func (f *SimpleFixer) TryFixFile(filePath string, validationResult *ValidationRe
 		}
 	}
 
-	// Apply general fixes
-	fixedContent, applied := f.fixCommonIssues(fixedContent)
-	result.FixesApplied = append(result.FixesApplied, applied...)
+	// Apply general fixes only if there were validation issues
+	// NOTE: fixCommonIssues was causing more harm than good by modifying valid files
+	// Only apply it when there are actual issues to fix
+	if validationResult != nil && len(validationResult.Issues) > 0 {
+		var applied []string
+		fixedContent, applied = f.fixCommonIssues(fixedContent)
+		result.FixesApplied = append(result.FixesApplied, applied...)
+	}
 
 	// Check if any changes were made
 	if fixedContent != originalContent {
