@@ -1,19 +1,34 @@
 // Package config provides configuration management for the LaTeX translator application.
+// All configuration is stored in a single file: ~/.config/RapidPaperTrans/config.json
 package config
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/md5"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
+	"latex-translator/internal/license"
 	"latex-translator/internal/logger"
 	"latex-translator/internal/types"
 )
 
 const (
 	// DefaultConfigFileName is the default configuration file name
-	DefaultConfigFileName = "latex-translator-config.json"
+	DefaultConfigFileName = "config.json"
+	// AppName is the application name used for config directory
+	AppName = "RapidPaperTrans"
 	// EnvOpenAIAPIKey is the environment variable name for OpenAI API key
 	EnvOpenAIAPIKey = "OPENAI_API_KEY"
 	// EnvOpenAIBaseURL is the environment variable name for OpenAI base URL
@@ -32,31 +47,135 @@ const (
 	DefaultConcurrency = 3
 	// DefaultLibraryPageSize is the default number of papers to display per page in library browser
 	DefaultLibraryPageSize = 20
+	// localEncryptionSecret is the app-specific secret for local encryption
+	localEncryptionSecret = "RapidPaperTrans-Local-2024"
 )
 
 // ConfigManager manages application configuration
 type ConfigManager struct {
 	configPath string
 	config     *types.Config
+	mu         sync.RWMutex
 }
 
-// NewConfigManager creates a new ConfigManager with the specified config path.
-// If configPath is empty, it uses the default path in user's home directory.
-func NewConfigManager(configPath string) (*ConfigManager, error) {
-	if configPath == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			logger.Error("failed to get user home directory", err)
-			return nil, types.NewAppError(types.ErrConfig, "failed to get user home directory", err)
-		}
-		configPath = filepath.Join(homeDir, ".config", "latex-translator", DefaultConfigFileName)
+// getConfigDir returns the config directory for the application
+// All platforms: ~/.config/RapidPaperTrans
+func getConfigDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", AppName), nil
+}
+
+// GetConfigDir returns the config directory (exported for external use)
+func GetConfigDir() (string, error) {
+	return getConfigDir()
+}
+
+// getDeviceID generates a stable device identifier based on hardware characteristics
+// This is used to bind the license to a specific machine
+func getDeviceID() string {
+	var parts []string
+
+	// Get hostname
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		parts = append(parts, "host:"+hostname)
 	}
 
-	logger.Info("ConfigManager initialized", logger.String("configPath", configPath))
-	return &ConfigManager{
-		configPath: configPath,
+	// Get username
+	if username := os.Getenv("USERNAME"); username != "" {
+		// Windows
+		parts = append(parts, "user:"+username)
+	} else if username := os.Getenv("USER"); username != "" {
+		// Unix/Linux/macOS
+		parts = append(parts, "user:"+username)
+	}
+
+	// Get MAC addresses from network interfaces
+	if interfaces, err := net.Interfaces(); err == nil {
+		var macs []string
+		for _, iface := range interfaces {
+			// Skip loopback and interfaces without MAC
+			if iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			mac := iface.HardwareAddr.String()
+			if mac != "" && mac != "00:00:00:00:00:00" {
+				macs = append(macs, mac)
+			}
+		}
+		// Sort MACs for consistency
+		sort.Strings(macs)
+		for _, mac := range macs {
+			parts = append(parts, "mac:"+mac)
+		}
+	}
+
+	// If we couldn't get any identifiers, use a fallback
+	if len(parts) == 0 {
+		// Use home directory as fallback
+		if home, err := os.UserHomeDir(); err == nil {
+			parts = append(parts, "home:"+home)
+		}
+	}
+
+	// Combine all parts and hash
+	combined := strings.Join(parts, "|")
+	hash := md5.Sum([]byte(combined))
+	return hex.EncodeToString(hash[:])
+}
+
+// GetDeviceID returns the device identifier for the current machine (exported)
+func GetDeviceID() string {
+	return getDeviceID()
+}
+
+// NewConfigManager creates a new ConfigManager.
+// Configuration is stored in the system config directory.
+func NewConfigManager(configPath string) (*ConfigManager, error) {
+	// If configPath is provided and is just a filename, use it in the system config dir
+	// If it's empty or a full path, handle accordingly
+	var finalPath string
+	
+	if configPath == "" {
+		// Use default path in system config directory
+		configDir, err := getConfigDir()
+		if err != nil {
+			logger.Error("failed to get config directory", err)
+			return nil, types.NewAppError(types.ErrConfig, "failed to get config directory", err)
+		}
+		finalPath = filepath.Join(configDir, DefaultConfigFileName)
+	} else if filepath.IsAbs(configPath) {
+		// Absolute path provided, use as-is
+		finalPath = configPath
+	} else {
+		// Relative path or just filename - use in system config directory
+		configDir, err := getConfigDir()
+		if err != nil {
+			logger.Error("failed to get config directory", err)
+			return nil, types.NewAppError(types.ErrConfig, "failed to get config directory", err)
+		}
+		finalPath = filepath.Join(configDir, filepath.Base(configPath))
+	}
+
+	// Ensure the directory exists
+	dir := filepath.Dir(finalPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		logger.Error("failed to create config directory", err, logger.String("dir", dir))
+		return nil, types.NewAppError(types.ErrConfig, "failed to create config directory", err)
+	}
+
+	logger.Info("ConfigManager initialized", logger.String("configPath", finalPath))
+	m := &ConfigManager{
+		configPath: finalPath,
 		config:     defaultConfig(),
-	}, nil
+	}
+	
+	// Load existing config
+	_ = m.Load()
+	
+	return m, nil
 }
 
 // defaultConfig returns a Config with default values
@@ -399,4 +518,358 @@ func (m *ConfigManager) ClearInputHistory() {
 // currentTimeMillis returns the current time in milliseconds.
 func currentTimeMillis() int64 {
 	return time.Now().UnixMilli()
+}
+
+// ============================================================================
+// License/Authorization Methods
+// ============================================================================
+
+// deriveLocalKey derives a local encryption key from the serial number and device ID
+// Uses SHA-256(SN + deviceID + app-secret) to create a 32-byte key
+func deriveLocalKey(serialNumber string) []byte {
+	deviceID := getDeviceID()
+	hash := sha256.Sum256([]byte(serialNumber + deviceID + localEncryptionSecret))
+	return hash[:]
+}
+
+// encryptLicenseInfo encrypts license info using AES-256-GCM
+func encryptLicenseInfo(info *license.LicenseInfo, serialNumber string) (string, error) {
+	// Serialize to JSON
+	plaintext, err := json.Marshal(info)
+	if err != nil {
+		return "", err
+	}
+
+	// Derive key
+	key := deriveLocalKey(serialNumber)
+
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	// Generate random nonce
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+
+	// Encrypt
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+
+	// Base64 encode
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+// decryptLicenseInfo decrypts license info using AES-256-GCM
+func decryptLicenseInfo(encryptedData, serialNumber string) (*license.LicenseInfo, error) {
+	// Base64 decode
+	ciphertext, err := base64.StdEncoding.DecodeString(encryptedData)
+	if err != nil {
+		return nil, err
+	}
+
+	// Derive key
+	key := deriveLocalKey(serialNumber)
+
+	// Create AES cipher
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create GCM mode
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+
+	// Extract nonce
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, err
+	}
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+
+	// Decrypt
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON
+	var info license.LicenseInfo
+	if err := json.Unmarshal(plaintext, &info); err != nil {
+		return nil, err
+	}
+
+	return &info, nil
+}
+
+// GetWorkMode returns the current work mode
+func (m *ConfigManager) GetWorkMode() license.WorkMode {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config != nil {
+		return license.WorkMode(m.config.WorkMode)
+	}
+	return ""
+}
+
+// SetWorkMode sets the work mode and saves
+func (m *ConfigManager) SetWorkMode(mode license.WorkMode) error {
+	m.mu.Lock()
+	if m.config == nil {
+		m.config = defaultConfig()
+	}
+	m.config.WorkMode = string(mode)
+	m.mu.Unlock()
+
+	return m.Save()
+}
+
+// GetLicenseInfo returns the license information
+// For commercial mode, decrypts the stored encrypted data
+func (m *ConfigManager) GetLicenseInfo() *license.LicenseInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.config == nil {
+		return nil
+	}
+
+	// No encrypted data or serial number
+	if m.config.EncryptedLicenseInfo == "" || m.config.SerialNumber == "" {
+		return nil
+	}
+
+	// Decrypt the license info
+	info, err := decryptLicenseInfo(m.config.EncryptedLicenseInfo, m.config.SerialNumber)
+	if err != nil {
+		return nil
+	}
+
+	// Ensure serial number is set (it's stored separately for decryption key)
+	if info != nil && info.SerialNumber == "" {
+		info.SerialNumber = m.config.SerialNumber
+	}
+
+	return info
+}
+
+// SetLicenseInfo sets the license information and saves
+// For commercial mode, encrypts the data before saving
+func (m *ConfigManager) SetLicenseInfo(info *license.LicenseInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.config == nil {
+		m.config = defaultConfig()
+	}
+
+	if info == nil {
+		m.config.SerialNumber = ""
+		m.config.EncryptedLicenseInfo = ""
+		return m.saveUnlocked()
+	}
+
+	// Encrypt the license info
+	encrypted, err := encryptLicenseInfo(info, info.SerialNumber)
+	if err != nil {
+		return err
+	}
+
+	m.config.SerialNumber = info.SerialNumber
+	m.config.EncryptedLicenseInfo = encrypted
+
+	return m.saveUnlocked()
+}
+
+// saveUnlocked saves settings without acquiring the lock (caller must hold lock)
+func (m *ConfigManager) saveUnlocked() error {
+	data, err := json.MarshalIndent(m.config, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(m.configPath, data, 0600)
+}
+
+// HasValidLicense checks if there is a valid (non-expired) commercial license
+func (m *ConfigManager) HasValidLicense() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.config == nil {
+		return false
+	}
+
+	// Check if work mode is commercial
+	if m.config.WorkMode != string(license.WorkModeCommercial) {
+		return false
+	}
+
+	// Check if encrypted license info exists
+	if m.config.EncryptedLicenseInfo == "" || m.config.SerialNumber == "" {
+		return false
+	}
+
+	// Decrypt and check license info
+	licenseInfo, err := decryptLicenseInfo(m.config.EncryptedLicenseInfo, m.config.SerialNumber)
+	if err != nil || licenseInfo == nil {
+		return false
+	}
+
+	// Check if activation data exists
+	if licenseInfo.ActivationData == nil {
+		return false
+	}
+
+	// Check if license is not expired
+	client := license.NewClient()
+	return !client.IsExpired(licenseInfo.ActivationData)
+}
+
+// HasWorkMode returns true if a work mode has been configured
+func (m *ConfigManager) HasWorkMode() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config != nil && m.config.WorkMode != ""
+}
+
+// NeedsWorkModeSelection returns true if the user needs to select a work mode
+func (m *ConfigManager) NeedsWorkModeSelection() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.config == nil || m.config.WorkMode == "" {
+		return true
+	}
+
+	// Opensource mode - no selection needed
+	if m.config.WorkMode == string(license.WorkModeOpenSource) {
+		return false
+	}
+
+	// Commercial mode - check if license is valid
+	if m.config.WorkMode == string(license.WorkModeCommercial) {
+		if m.config.EncryptedLicenseInfo == "" || m.config.SerialNumber == "" {
+			return true
+		}
+
+		licenseInfo, err := decryptLicenseInfo(m.config.EncryptedLicenseInfo, m.config.SerialNumber)
+		if err != nil || licenseInfo == nil || licenseInfo.ActivationData == nil {
+			return true
+		}
+
+		client := license.NewClient()
+		if client.IsExpired(licenseInfo.ActivationData) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// WorkModeStatus represents the detailed status of work mode configuration
+type WorkModeStatus struct {
+	HasWorkMode         bool             `json:"has_work_mode"`
+	WorkMode            license.WorkMode `json:"work_mode"`
+	NeedsSelection      bool             `json:"needs_selection"`
+	IsCommercial        bool             `json:"is_commercial"`
+	IsOpenSource        bool             `json:"is_open_source"`
+	HasValidLicense     bool             `json:"has_valid_license"`
+	LicenseExpired      bool             `json:"license_expired"`
+	LicenseExpiringSoon bool             `json:"license_expiring_soon"`
+	DaysUntilExpiry     int              `json:"days_until_expiry"`
+}
+
+// GetWorkModeStatus returns detailed status information about the work mode configuration
+func (m *ConfigManager) GetWorkModeStatus() WorkModeStatus {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	status := WorkModeStatus{
+		HasWorkMode:     m.config != nil && m.config.WorkMode != "",
+		WorkMode:        license.WorkMode(m.config.WorkMode),
+		NeedsSelection:  false,
+		IsCommercial:    m.config != nil && m.config.WorkMode == string(license.WorkModeCommercial),
+		IsOpenSource:    m.config != nil && m.config.WorkMode == string(license.WorkModeOpenSource),
+		HasValidLicense: false,
+		LicenseExpired:  false,
+		LicenseExpiringSoon: false,
+		DaysUntilExpiry: -1,
+	}
+
+	if !status.HasWorkMode {
+		status.NeedsSelection = true
+		return status
+	}
+
+	if status.IsOpenSource {
+		return status
+	}
+
+	if status.IsCommercial {
+		if m.config.EncryptedLicenseInfo == "" || m.config.SerialNumber == "" {
+			status.NeedsSelection = true
+			return status
+		}
+
+		licenseInfo, err := decryptLicenseInfo(m.config.EncryptedLicenseInfo, m.config.SerialNumber)
+		if err != nil || licenseInfo == nil || licenseInfo.ActivationData == nil {
+			status.NeedsSelection = true
+			return status
+		}
+
+		client := license.NewClient()
+		activationData := licenseInfo.ActivationData
+
+		status.LicenseExpired = client.IsExpired(activationData)
+		status.DaysUntilExpiry = client.DaysUntilExpiry(activationData)
+		status.LicenseExpiringSoon = status.DaysUntilExpiry >= 0 && status.DaysUntilExpiry <= 7
+		status.HasValidLicense = !status.LicenseExpired
+
+		if status.LicenseExpired {
+			status.NeedsSelection = true
+		}
+	}
+
+	return status
+}
+
+// GetGitHubToken returns the GitHub token (for sharing feature)
+func (m *ConfigManager) GetGitHubToken() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.config != nil {
+		return m.config.GitHubToken
+	}
+	return ""
+}
+
+// SetGitHubToken sets the GitHub token and saves
+func (m *ConfigManager) SetGitHubToken(token string) error {
+	m.mu.Lock()
+	if m.config == nil {
+		m.config = defaultConfig()
+	}
+	m.config.GitHubToken = token
+	m.mu.Unlock()
+
+	return m.Save()
+}
+
+// HasGitHubToken returns true if a GitHub token is configured
+func (m *ConfigManager) HasGitHubToken() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config != nil && m.config.GitHubToken != ""
 }

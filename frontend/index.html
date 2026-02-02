@@ -5,6 +5,7 @@
     <meta charset="UTF-8" />
     <meta content="width=device-width, initial-scale=1.0" name="viewport" />
     <title>论译 RapidPaperTrans</title>
+    <link rel="stylesheet" href="./src/style.css" />
     <style>
         /* CSS Reset and Base Styles */
         * {
@@ -885,7 +886,7 @@
 
         /* About Modal Styles */
         .about-modal {
-            max-width: 360px;
+            max-width: 320px;
             text-align: center;
         }
 
@@ -893,72 +894,76 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 30px 24px;
+            padding: 16px 20px;
         }
 
         .about-logo {
-            font-size: 64px;
-            margin-bottom: 16px;
+            margin-bottom: 8px;
+        }
+
+        .about-logo svg {
+            width: 56px;
+            height: 56px;
         }
 
         .about-title {
-            font-size: 28px;
+            font-size: 22px;
             font-weight: 700;
             color: #3d5a6c;
             margin: 0;
         }
 
         .about-subtitle {
-            font-size: 16px;
+            font-size: 13px;
             color: #7eb8c9;
-            margin: 4px 0 4px 0;
+            margin: 2px 0;
             font-weight: 500;
         }
 
         .about-slogan {
-            font-size: 13px;
-            color: #888;
+            font-size: 11px;
+            color: #999;
             font-style: italic;
-            margin: 0 0 8px 0;
+            margin: 0 0 4px 0;
         }
 
         .about-version {
-            font-size: 14px;
+            font-size: 12px;
             color: #8a9caa;
             margin: 0;
         }
 
         .about-divider {
-            width: 60px;
+            width: 40px;
             height: 2px;
             background: linear-gradient(135deg, #7eb8c9 0%, #5a9aad 100%);
-            margin: 20px 0;
+            margin: 12px 0;
             border-radius: 1px;
         }
 
         .about-description {
-            font-size: 14px;
+            font-size: 12px;
             color: #5a7080;
-            line-height: 1.6;
-            margin: 0 0 16px 0;
+            line-height: 1.5;
+            margin: 0 0 8px 0;
         }
 
         .about-author {
-            font-size: 13px;
-            color: #888;
+            font-size: 11px;
+            color: #999;
         }
 
         .about-github {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            margin-top: 16px;
-            padding: 8px 16px;
+            gap: 4px;
+            margin-top: 10px;
+            padding: 6px 12px;
             background: #24292e;
             color: white;
             text-decoration: none;
-            border-radius: 6px;
-            font-size: 14px;
+            border-radius: 5px;
+            font-size: 12px;
             transition: background 0.2s;
         }
 
@@ -966,8 +971,138 @@
             background: #444d56;
         }
 
+        .about-github svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .about-modal .modal-header {
+            padding: 12px 16px;
+        }
+
+        .about-modal .modal-header h2 {
+            font-size: 15px;
+        }
+
         .about-modal .modal-footer {
             justify-content: center;
+            padding: 10px 16px;
+        }
+
+        .about-modal .modal-footer .btn {
+            padding: 6px 20px;
+            font-size: 13px;
+        }
+
+        /* License section in about modal */
+        #about-license-section {
+            width: 100%;
+            margin-top: 4px;
+            padding: 10px;
+            background: #f8fafb;
+            border-radius: 6px;
+            border: 1px solid #e8eff3;
+        }
+
+        #about-license-section h4 {
+            font-size: 12px;
+            color: #5a7080;
+            margin: 0 0 8px 0;
+        }
+
+        .license-info-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            font-size: 11px;
+        }
+
+        .license-info-label {
+            color: #8a9caa;
+        }
+
+        .license-info-value {
+            color: #3d5a6c;
+            font-weight: 500;
+        }
+
+        .license-warning {
+            margin-top: 6px;
+            padding: 6px 8px;
+            background: #fff3cd;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #856404;
+        }
+
+        /* License Settings Tab Styles */
+        .license-settings-section {
+            padding: 8px 0;
+        }
+
+        .license-info-card {
+            background: #f8fafb;
+            border: 1px solid #e8eff3;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+        }
+
+        .license-info-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #e8eff3;
+        }
+
+        .license-info-item:last-child {
+            border-bottom: none;
+        }
+
+        .license-info-item .license-info-label {
+            font-size: 14px;
+            color: #6b8090;
+        }
+
+        .license-info-item .license-info-value {
+            font-size: 14px;
+            color: #3d5a6c;
+            font-weight: 500;
+            font-family: 'Courier New', Consolas, monospace;
+        }
+
+        .license-warning-box {
+            padding: 12px 16px;
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            color: #856404;
+            font-size: 14px;
+            margin-bottom: 16px;
+        }
+
+        .license-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 8px;
+        }
+
+        .license-refresh-status {
+            font-size: 13px;
+        }
+
+        .license-refresh-status.success {
+            color: #81c995;
+        }
+
+        .license-refresh-status.error {
+            color: #e57373;
+        }
+
+        .license-refresh-status.loading {
+            color: #f0b429;
         }
 
         /* Results Management Modal Styles */
@@ -1366,6 +1501,54 @@
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
+        }
+
+        /* Settings Modal Wide */
+        .settings-modal-wide {
+            max-width: 600px;
+        }
+
+        /* Settings Tabs */
+        .settings-tabs {
+            display: flex;
+            border-bottom: 1px solid #e8eff3;
+            background: #fafcfd;
+            padding: 0 16px;
+        }
+
+        .settings-tab {
+            padding: 12px 20px;
+            border: none;
+            background: none;
+            font-size: 14px;
+            font-weight: 500;
+            color: #8a9caa;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            white-space: nowrap;
+        }
+
+        .settings-tab:hover {
+            color: #5a7080;
+            background: rgba(126, 184, 201, 0.05);
+        }
+
+        .settings-tab.active {
+            color: #4a8fa8;
+            border-bottom-color: #4a8fa8;
+        }
+
+        .settings-body {
+            min-height: 300px;
+        }
+
+        .settings-tab-content {
+            display: none;
+        }
+
+        .settings-tab-content.active {
+            display: block;
         }
 
         /* Settings Section Title */
@@ -2501,88 +2684,138 @@
 
         <!-- Settings Modal -->
         <div class="modal-overlay" id="settings-modal">
-            <div class="modal">
+            <div class="modal settings-modal-wide">
                 <div class="modal-header">
                     <h2>⚙️ 设置</h2>
                     <button class="modal-close" id="modal-close">&times;</button>
                 </div>
-                <div class="modal-body">
-                    <div class="form-group">
-                        <label for="setting-api-key">API Key</label>
-                        <input type="password" id="setting-api-key" placeholder="sk-..." autocomplete="off" />
-                        <p class="hint">OpenAI 或兼容 API 的密钥</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-base-url">API Base URL</label>
-                        <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1"
-                            autocomplete="off" />
-                        <p class="hint">OpenAI 兼容 API 的地址，如 https://api.deepseek.com/v1</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-model">模型</label>
-                        <input type="text" id="setting-model" placeholder="gpt-4" autocomplete="off" />
-                        <p class="hint">使用的模型名称，如 gpt-4、gpt-3.5-turbo、deepseek-chat</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-context-window">上下文窗口 (tokens)</label>
-                        <input type="number" id="setting-context-window" placeholder="8192" min="1024" max="128000"
-                            autocomplete="off" />
-                        <p class="hint">模型的上下文窗口大小，默认 8192</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-compiler">LaTeX 编译器</label>
-                        <select id="setting-compiler">
-                            <option value="pdflatex">pdflatex</option>
-                            <option value="xelatex">xelatex</option>
-                            <option value="lualatex">lualatex</option>
-                        </select>
-                        <p class="hint">默认编译器（中文文档会自动使用 xelatex）</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-workdir">工作目录</label>
-                        <div class="input-with-button">
-                            <input type="text" id="setting-workdir" placeholder="留空使用临时目录" autocomplete="off" />
-                            <button class="btn btn-secondary btn-small" id="btn-browse-workdir">📁</button>
+                <!-- Settings Tabs -->
+                <div class="settings-tabs">
+                    <button class="settings-tab active" data-tab="llm" id="settings-tab-btn-llm">🤖 LLM 设置</button>
+                    <button class="settings-tab" data-tab="latex">📄 LaTeX 设置</button>
+                    <button class="settings-tab" data-tab="share">🔗 分享设置</button>
+                    <button class="settings-tab" data-tab="system">⚙️ 系统设置</button>
+                    <button class="settings-tab" data-tab="license" id="settings-tab-btn-license" style="display: none;">🔑 授权信息</button>
+                </div>
+                <div class="modal-body settings-body">
+                    <!-- LLM Settings Tab -->
+                    <div class="settings-tab-content active" id="settings-tab-llm">
+                        <div class="form-group">
+                            <label for="setting-api-key">API Key</label>
+                            <input type="password" id="setting-api-key" placeholder="sk-..." autocomplete="off" />
+                            <p class="hint">OpenAI 或兼容 API 的密钥</p>
                         </div>
-                        <p class="hint">处理文件的工作目录，留空则使用系统临时目录</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-concurrency">翻译并发数</label>
-                        <input type="number" id="setting-concurrency" placeholder="3" min="1" max="10"
-                            autocomplete="off" />
-                        <p class="hint">同时翻译的分块数量，增加可加快速度但会消耗更多 API 配额，默认 3</p>
-                    </div>
-                    <div class="form-group">
-                        <label for="setting-library-page-size">浏览库每页显示数量</label>
-                        <input type="number" id="setting-library-page-size" placeholder="20" min="1" max="100"
-                            autocomplete="off" />
-                        <p class="hint">浏览共享库时每页显示的论文数量，默认 20</p>
-                    </div>
-                    <div class="form-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox" id="setting-share-prompt" checked />
-                            <span>翻译完成后提示分享</span>
-                        </label>
-                        <p class="hint">翻译成功完成后，弹出分享确认提示</p>
-                    </div>
-                    <div class="form-group test-connection">
-                        <button class="btn btn-secondary" id="btn-test-connection">🔗 测试 LLM 连接</button>
-                        <span class="test-status" id="test-status"></span>
+                        <div class="form-group">
+                            <label for="setting-base-url">API Base URL</label>
+                            <input type="text" id="setting-base-url" placeholder="https://api.openai.com/v1"
+                                autocomplete="off" />
+                            <p class="hint">OpenAI 兼容 API 的地址，如 https://api.deepseek.com/v1</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="setting-model">模型</label>
+                            <input type="text" id="setting-model" placeholder="gpt-4" autocomplete="off" />
+                            <p class="hint">使用的模型名称，如 gpt-4、gpt-3.5-turbo、deepseek-chat</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="setting-context-window">上下文窗口 (tokens)</label>
+                            <input type="number" id="setting-context-window" placeholder="8192" min="1024" max="128000"
+                                autocomplete="off" />
+                            <p class="hint">模型的上下文窗口大小，默认 8192</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="setting-concurrency">翻译并发数</label>
+                            <input type="number" id="setting-concurrency" placeholder="3" min="1" max="10"
+                                autocomplete="off" />
+                            <p class="hint">同时翻译的分块数量，增加可加快速度但会消耗更多 API 配额，默认 3</p>
+                        </div>
+                        <div class="form-group test-connection">
+                            <button class="btn btn-secondary" id="btn-test-connection">🔗 测试 LLM 连接</button>
+                            <span class="test-status" id="test-status"></span>
+                        </div>
                     </div>
 
-                    <!-- GitHub 分享配置 -->
-                    <div class="settings-section-title">GitHub 分享配置（可选）</div>
-                    <div class="form-group">
-                        <label for="setting-github-token">GitHub Token</label>
-                        <input type="password" id="setting-github-token" placeholder="自动获取或手动输入" autocomplete="off"
-                            readonly />
-                        <p class="hint">Token 已自动从远程获取，用于访问 GitHub 仓库 (rapidaicoder/chinesepaper)</p>
+                    <!-- LaTeX Settings Tab -->
+                    <div class="settings-tab-content" id="settings-tab-latex">
+                        <div class="form-group">
+                            <label for="setting-compiler">LaTeX 编译器</label>
+                            <select id="setting-compiler">
+                                <option value="pdflatex">pdflatex</option>
+                                <option value="xelatex">xelatex</option>
+                                <option value="lualatex">lualatex</option>
+                            </select>
+                            <p class="hint">默认编译器（中文文档会自动使用 xelatex）</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="setting-workdir">工作目录</label>
+                            <div class="input-with-button">
+                                <input type="text" id="setting-workdir" placeholder="留空使用临时目录" autocomplete="off" />
+                                <button class="btn btn-secondary btn-small" id="btn-browse-workdir">📁</button>
+                            </div>
+                            <p class="hint">处理文件的工作目录，留空则使用系统临时目录</p>
+                        </div>
                     </div>
-                    <div class="form-group test-connection">
-                        <button class="btn btn-secondary" id="btn-update-github-token">🔄 更新 Token</button>
-                        <button class="btn btn-secondary" id="btn-test-github">🔗 测试 GitHub 连接</button>
-                        <span class="test-status" id="github-test-status"></span>
-                        <span class="test-status" id="github-update-status"></span>
+
+                    <!-- Share Settings Tab -->
+                    <div class="settings-tab-content" id="settings-tab-share">
+                        <div class="form-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" id="setting-share-prompt" checked />
+                                <span>翻译完成后提示分享</span>
+                            </label>
+                            <p class="hint">翻译成功完成后，弹出分享确认提示</p>
+                        </div>
+                        <div class="form-group">
+                            <label for="setting-github-token">GitHub Token</label>
+                            <input type="password" id="setting-github-token" placeholder="自动获取或手动输入" autocomplete="off"
+                                readonly />
+                            <p class="hint">Token 已自动从远程获取，用于访问 GitHub 仓库 (rapidaicoder/chinesepaper)</p>
+                        </div>
+                        <div class="form-group test-connection">
+                            <button class="btn btn-secondary" id="btn-update-github-token">🔄 更新 Token</button>
+                            <button class="btn btn-secondary" id="btn-test-github">🔗 测试 GitHub 连接</button>
+                            <span class="test-status" id="github-test-status"></span>
+                            <span class="test-status" id="github-update-status"></span>
+                        </div>
+                    </div>
+
+                    <!-- System Settings Tab -->
+                    <div class="settings-tab-content" id="settings-tab-system">
+                        <div class="form-group">
+                            <label for="setting-library-page-size">浏览库每页显示数量</label>
+                            <input type="number" id="setting-library-page-size" placeholder="20" min="1" max="100"
+                                autocomplete="off" />
+                            <p class="hint">浏览共享库时每页显示的论文数量，默认 20</p>
+                        </div>
+                    </div>
+
+                    <!-- License Settings Tab (commercial mode only) -->
+                    <div class="settings-tab-content" id="settings-tab-license">
+                        <div class="license-settings-section">
+                            <div class="license-info-card">
+                                <div class="license-info-item">
+                                    <span class="license-info-label">序列号</span>
+                                    <span class="license-info-value" id="settings-license-sn">-</span>
+                                </div>
+                                <div class="license-info-item">
+                                    <span class="license-info-label">有效期至</span>
+                                    <span class="license-info-value" id="settings-license-expires">-</span>
+                                </div>
+                                <div class="license-info-item">
+                                    <span class="license-info-label">每日限制</span>
+                                    <span class="license-info-value" id="settings-license-daily">-</span>
+                                </div>
+                                <div class="license-info-item">
+                                    <span class="license-info-label">剩余天数</span>
+                                    <span class="license-info-value" id="settings-license-remaining">-</span>
+                                </div>
+                            </div>
+                            <div id="settings-license-warning" class="license-warning-box" style="display: none;"></div>
+                            <div class="license-actions">
+                                <button class="btn btn-primary" id="btn-refresh-license">🔄 刷新授权</button>
+                                <span class="license-refresh-status" id="license-refresh-status"></span>
+                            </div>
+                            <p class="hint">刷新授权将重新从服务器获取最新的授权信息</p>
+                        </div>
                     </div>
                 </div>
                 <div class="modal-footer">
@@ -2599,47 +2832,52 @@
         <div class="modal-overlay" id="about-modal">
             <div class="modal about-modal">
                 <div class="modal-header">
-                    <h2>ℹ️ 关于</h2>
+                    <h2>关于</h2>
                     <button class="modal-close" id="about-modal-close">&times;</button>
                 </div>
                 <div class="modal-body about-body">
                     <div class="about-logo">
-                        <svg viewBox="0 0 100 100" width="80" height="80">
-                            <!-- Document base -->
+                        <svg viewBox="0 0 100 100">
                             <rect x="15" y="5" width="50" height="65" rx="3" fill="#667eea" opacity="0.9" />
                             <rect x="20" y="10" width="40" height="55" rx="2" fill="white" />
-                            <!-- Text lines -->
                             <rect x="25" y="18" width="30" height="3" rx="1" fill="#ddd" />
                             <rect x="25" y="25" width="25" height="3" rx="1" fill="#ddd" />
                             <rect x="25" y="32" width="28" height="3" rx="1" fill="#ddd" />
-                            <rect x="25" y="39" width="20" height="3" rx="1" fill="#ddd" />
-                            <!-- Arrow -->
                             <path d="M55 45 L75 45 L75 38 L90 50 L75 62 L75 55 L55 55 Z" fill="#764ba2" />
-                            <!-- Translated document -->
                             <rect x="35" y="30" width="50" height="65" rx="3" fill="#4CAF50" opacity="0.9" />
                             <rect x="40" y="35" width="40" height="55" rx="2" fill="white" />
-                            <!-- Chinese text representation -->
                             <rect x="45" y="43" width="30" height="3" rx="1" fill="#4CAF50" />
                             <rect x="45" y="50" width="25" height="3" rx="1" fill="#4CAF50" />
                             <rect x="45" y="57" width="28" height="3" rx="1" fill="#4CAF50" />
-                            <rect x="45" y="64" width="20" height="3" rx="1" fill="#4CAF50" />
                         </svg>
                     </div>
                     <h3 class="about-title">论译</h3>
                     <p class="about-subtitle">RapidPaperTrans</p>
-                    <p class="about-slogan">Rapid Translation, Flawless Integration.</p>
-                    <p class="about-version">版本 1.0 beta</p>
+                    <p class="about-slogan">Rapid Translation, Flawless Integration</p>
+                    <p class="about-version">v1.0 beta</p>
                     <div class="about-divider"></div>
-                    <p class="about-description">
-                        将英文 LaTeX 学术论文翻译成中文并生成 PDF
-                    </p>
-                    <div class="about-author">
-                        <span>作者：Dr. Daniel</span>
+                    <p class="about-description">英文 LaTeX 学术论文翻译成中文 PDF</p>
+                    <p class="about-author">作者：Dr. Daniel</p>
+                    <!-- License Info Section (commercial mode only) -->
+                    <div id="about-license-section" style="display: none;">
+                        <h4>授权信息</h4>
+                        <div class="license-info-row">
+                            <span class="license-info-label">序列号</span>
+                            <span class="license-info-value" id="license-serial-number">-</span>
+                        </div>
+                        <div class="license-info-row">
+                            <span class="license-info-label">有效期至</span>
+                            <span class="license-info-value" id="license-expires">-</span>
+                        </div>
+                        <div class="license-info-row">
+                            <span class="license-info-label">每日限制</span>
+                            <span class="license-info-value" id="license-daily-limit">-</span>
+                        </div>
+                        <div id="license-warning" class="license-warning" style="display: none;"></div>
                     </div>
                     <a class="about-github" href="#" id="github-link">
-                        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
-                            <path
-                                d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
+                        <svg viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z" />
                         </svg>
                         GitHub
                     </a>
@@ -2966,6 +3204,97 @@
                 <div class="modal-footer">
                     <button class="btn btn-secondary" id="btn-translate-cancel">取消</button>
                     <button class="btn btn-primary" id="btn-translate-confirm">🚀 开始翻译</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 模式选择模态框 -->
+        <div id="mode-selection-modal" class="modal-overlay">
+            <div class="modal mode-selection-modal">
+                <div class="modal-header">
+                    <h2>选择工作模式</h2>
+                </div>
+                <div class="modal-body">
+                    <p class="mode-intro">请选择您的软件使用模式：</p>
+                    
+                    <div class="mode-options">
+                        <div class="mode-option" id="mode-commercial">
+                            <div class="mode-icon">🏢</div>
+                            <div class="mode-info">
+                                <h3>商业软件模式</h3>
+                                <p>使用序列号激活，自动获取 LLM 配置</p>
+                                <ul>
+                                    <li>无需手动配置 API</li>
+                                    <li>专业技术支持</li>
+                                    <li>定期更新维护</li>
+                                </ul>
+                            </div>
+                        </div>
+                        
+                        <div class="mode-option" id="mode-opensource">
+                            <div class="mode-icon">🌐</div>
+                            <div class="mode-info">
+                                <h3>开源软件模式</h3>
+                                <p>手动配置您自己的 LLM API</p>
+                                <ul>
+                                    <li>使用自己的 API 密钥</li>
+                                    <li>完全自主控制</li>
+                                    <li>社区支持</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 序列号输入模态框 -->
+        <div id="serial-number-modal" class="modal-overlay">
+            <div class="modal serial-number-modal">
+                <div class="modal-header">
+                    <h2>激活商业授权</h2>
+                    <button class="modal-close" id="sn-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="serial-number-input">序列号</label>
+                        <input type="text" id="serial-number-input" 
+                               placeholder="XXXX-XXXX-XXXX-XXXX"
+                               maxlength="19">
+                        <p class="hint">请输入您的序列号，格式：XXXX-XXXX-XXXX-XXXX</p>
+                    </div>
+                    
+                    <div id="sn-error" class="error-message" style="display: none;"></div>
+                    
+                    <div class="sn-actions">
+                        <button class="btn btn-primary" id="btn-activate">激活</button>
+                        <button class="btn btn-secondary" id="btn-request-sn">申请序列号</button>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-sn-back">返回</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- 邮箱申请序列号模态框 -->
+        <div id="email-request-modal" class="modal-overlay">
+            <div class="modal email-request-modal">
+                <div class="modal-header">
+                    <h2>申请序列号</h2>
+                    <button class="modal-close" id="email-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <p class="email-request-intro">请输入您的邮箱地址，我们将向您发送序列号。</p>
+                    <div class="form-group">
+                        <label for="email-input">邮箱地址</label>
+                        <input type="email" id="email-input" placeholder="your@email.com">
+                    </div>
+                    <div id="email-error" class="error-message" style="display: none;"></div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="btn-email-back">返回</button>
+                    <button class="btn btn-primary" id="btn-submit-email">提交申请</button>
                 </div>
             </div>
         </div>

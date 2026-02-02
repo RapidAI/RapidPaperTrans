@@ -21,11 +21,11 @@ import (
 	"latex-translator/internal/downloader"
 	"latex-translator/internal/errors"
 	"latex-translator/internal/github"
+	"latex-translator/internal/license"
 	"latex-translator/internal/logger"
 	"latex-translator/internal/parser"
 	"latex-translator/internal/pdf"
 	"latex-translator/internal/results"
-	"latex-translator/internal/settings"
 	"latex-translator/internal/translator"
 	"latex-translator/internal/types"
 	"latex-translator/internal/validator"
@@ -60,9 +60,11 @@ type App struct {
 	compiler   *compiler.LaTeXCompiler
 	validator  *validator.SyntaxValidator
 	results    *results.ResultManager
-	settings   *settings.Manager
 	errorMgr   *errors.ErrorManager
 	workDir    string
+
+	// License client for commercial mode
+	licenseClient *license.Client
 
 	// Status tracking
 	status         *types.Status
@@ -166,7 +168,71 @@ func (a *App) startup(ctx context.Context) {
 	a.downloader = downloader.NewSourceDownloader(a.workDir)
 	logger.Debug("downloader initialized", logger.String("workDir", a.workDir))
 
-	// Initialize translator with API key from config
+	// Initialize license client for commercial mode (needed before checking work mode)
+	a.licenseClient = license.NewClient()
+	logger.Debug("license client initialized")
+
+	// Check work mode status and apply license config BEFORE initializing translator
+	// This ensures the translator uses the correct API key from the license
+	// Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 3.4
+	if a.config != nil {
+		workModeStatus := a.config.GetWorkModeStatus()
+		logger.Info("work mode status at startup",
+			logger.Bool("hasWorkMode", workModeStatus.HasWorkMode),
+			logger.String("workMode", string(workModeStatus.WorkMode)),
+			logger.Bool("needsSelection", workModeStatus.NeedsSelection),
+			logger.Bool("hasValidLicense", workModeStatus.HasValidLicense),
+			logger.Bool("licenseExpired", workModeStatus.LicenseExpired),
+			logger.Bool("licenseExpiringSoon", workModeStatus.LicenseExpiringSoon))
+
+		// If commercial mode with valid license, update config with license LLM settings
+		// This must happen BEFORE translator initialization so GetAPIKey() returns the correct value
+		if workModeStatus.IsCommercial && workModeStatus.HasValidLicense {
+			licenseInfo := a.config.GetLicenseInfo()
+			if licenseInfo != nil && licenseInfo.ActivationData != nil {
+				activationData := licenseInfo.ActivationData
+				// Get effective base URL - derives from LLMType if LLMBaseURL is empty
+				effectiveBaseURL := a.licenseClient.GetEffectiveBaseURL(activationData)
+				logger.Info("applying license LLM config before translator init",
+					logger.String("llmType", activationData.LLMType),
+					logger.String("model", activationData.LLMModel),
+					logger.Int("apiKeyLength", len(activationData.LLMAPIKey)),
+					logger.String("originalBaseURL", activationData.LLMBaseURL),
+					logger.String("effectiveBaseURL", effectiveBaseURL))
+				
+				// Update config with license values so GetAPIKey/GetModel/GetBaseURL return correct values
+				if err := a.config.UpdateConfig(
+					activationData.LLMAPIKey,
+					effectiveBaseURL, // Use effective base URL instead of raw LLMBaseURL
+					activationData.LLMModel,
+					a.config.GetContextWindow(),
+					a.config.GetDefaultCompiler(),
+					a.config.GetWorkDirectory(),
+					a.config.GetConcurrency(),
+					a.config.GetLibraryPageSize(),
+					true, // sharePromptEnabled
+				); err != nil {
+					logger.Warn("failed to apply license LLM config", logger.Err(err))
+				}
+			}
+		}
+
+		// Emit startup mode event to frontend
+		// The frontend will handle showing mode selection or proceeding to main interface
+		a.safeEmit("startup-mode-status", map[string]interface{}{
+			"has_work_mode":         workModeStatus.HasWorkMode,
+			"work_mode":             string(workModeStatus.WorkMode),
+			"needs_selection":       workModeStatus.NeedsSelection,
+			"is_commercial":         workModeStatus.IsCommercial,
+			"is_open_source":        workModeStatus.IsOpenSource,
+			"has_valid_license":     workModeStatus.HasValidLicense,
+			"license_expired":       workModeStatus.LicenseExpired,
+			"license_expiring_soon": workModeStatus.LicenseExpiringSoon,
+			"days_until_expiry":     workModeStatus.DaysUntilExpiry,
+		})
+	}
+
+	// Now initialize translator with API key from config (which now includes license values if applicable)
 	apiKey := a.config.GetAPIKey()
 	model := a.config.GetModel()
 	baseURL := a.config.GetBaseURL()
@@ -222,15 +288,6 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		a.results = resultMgr
 		logger.Debug("result manager initialized", logger.String("baseDir", resultMgr.GetBaseDir()))
-	}
-
-	// Initialize settings manager for local settings (GitHub token, etc.)
-	settingsMgr, err := settings.NewManager()
-	if err != nil {
-		logger.Warn("failed to initialize settings manager", logger.Err(err))
-	} else {
-		a.settings = settingsMgr
-		logger.Debug("settings manager initialized", logger.String("filePath", settingsMgr.GetFilePath()))
 	}
 
 	// Initialize error manager
@@ -415,6 +472,102 @@ func (a *App) ReloadConfig() error {
 	return nil
 }
 
+// applyLicenseLLMConfig applies LLM configuration from the commercial license.
+// This is called at startup when commercial mode has a valid license.
+// It updates the translator, validator, and PDF translator with the license LLM settings.
+// Validates: Requirements 3.4
+func (a *App) applyLicenseLLMConfig() {
+	if a.config == nil {
+		return
+	}
+
+	licenseInfo := a.config.GetLicenseInfo()
+	if licenseInfo == nil || licenseInfo.ActivationData == nil {
+		return
+	}
+
+	activationData := licenseInfo.ActivationData
+	// Get effective base URL - derives from LLMType if LLMBaseURL is empty
+	effectiveBaseURL := a.licenseClient.GetEffectiveBaseURL(activationData)
+	logger.Info("applying LLM config from license",
+		logger.String("llmType", activationData.LLMType),
+		logger.String("model", activationData.LLMModel),
+		logger.String("originalBaseURL", activationData.LLMBaseURL),
+		logger.String("effectiveBaseURL", effectiveBaseURL))
+
+	// Get current config values for fields we don't want to change
+	contextWindow := config.DefaultContextWindow
+	compiler := config.DefaultCompiler
+	workDir := ""
+	concurrency := config.DefaultConcurrency
+	libraryPageSize := config.DefaultLibraryPageSize
+	sharePromptEnabled := true
+
+	if a.config != nil {
+		contextWindow = a.config.GetContextWindow()
+		compiler = a.config.GetDefaultCompiler()
+		workDir = a.config.GetWorkDirectory()
+		concurrency = a.config.GetConcurrency()
+		libraryPageSize = a.config.GetLibraryPageSize()
+		// Get current share prompt setting from config
+		cfg := a.config.GetConfig()
+		if cfg != nil {
+			sharePromptEnabled = cfg.SharePromptEnabled
+		}
+	}
+
+	// Update config manager with license LLM settings using UpdateConfig
+	if a.config != nil {
+		if err := a.config.UpdateConfig(
+			activationData.LLMAPIKey,
+			effectiveBaseURL, // Use effective base URL instead of raw LLMBaseURL
+			activationData.LLMModel,
+			contextWindow,
+			compiler,
+			workDir,
+			concurrency,
+			libraryPageSize,
+			sharePromptEnabled,
+		); err != nil {
+			logger.Warn("failed to save license LLM config", logger.Err(err))
+		}
+	}
+
+	// Update translator with new config
+	if a.translator != nil {
+		a.translator = translator.NewTranslationEngineWithConfig(
+			activationData.LLMAPIKey,
+			activationData.LLMModel,
+			effectiveBaseURL, // Use effective base URL
+			0,
+			concurrency,
+		)
+	}
+
+	// Update validator with new config
+	if a.validator != nil {
+		a.validator = validator.NewSyntaxValidatorWithConfig(
+			activationData.LLMAPIKey,
+			activationData.LLMModel,
+			effectiveBaseURL, // Use effective base URL
+			0,
+		)
+	}
+
+	// Update PDF translator with new config
+	if a.pdfTranslator != nil {
+		a.pdfTranslator.UpdateConfig(&types.Config{
+			OpenAIAPIKey:  activationData.LLMAPIKey,
+			OpenAIBaseURL: effectiveBaseURL, // Use effective base URL
+			OpenAIModel:   activationData.LLMModel,
+			ContextWindow: contextWindow,
+			Concurrency:   concurrency,
+		})
+	}
+
+	logger.Info("license LLM config applied successfully")
+}
+
 // SetStatusCallback sets the callback function for status updates.
 // The callback will be called whenever the processing status changes.
 func (a *App) SetStatusCallback(callback StatusCallback) {
@@ -451,6 +604,33 @@ func (a *App) IsProcessing() bool {
 	default:
 		return true
 	}
+}
+
+// IsPDFTranslating returns true if a PDF translation task is currently in progress.
+// This method is thread-safe.
+func (a *App) IsPDFTranslating() bool {
+	if a.pdfTranslator == nil {
+		return false
+	}
+
+	status := a.pdfTranslator.GetStatus()
+	if status == nil {
+		return false
+	}
+
+	// PDF translation is active if phase is not idle, complete, or error
+	switch status.Phase {
+	case pdf.PDFPhaseIdle, pdf.PDFPhaseComplete, pdf.PDFPhaseError:
+		return false
+	default:
+		return true
+	}
+}
+
+// IsAnyTranslationInProgress returns true if any translation task (LaTeX or PDF) is in progress.
+// This is used for close confirmation dialog.
+func (a *App) IsAnyTranslationInProgress() bool {
+	return a.IsProcessing() || a.IsPDFTranslating()
 }
 
 // updateStatus updates the current status and notifies the callback.
@@ -930,25 +1110,47 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		if !validationResult.IsValid {
 			a.updateStatus(types.PhaseValidating, 65, "修正语法错误...")
 			logger.Info("fixing syntax errors", logger.Int("errorCount", len(validationResult.Errors)))
-			translatedContent, err = a.validator.Fix(translatedContent, validationResult.Errors)
+			
+			// Save original content before fix attempt
+			originalTranslatedContent := translatedContent
+			originalLineCount := strings.Count(originalTranslatedContent, "\n") + 1
+			
+			fixedContent, err := a.validator.Fix(translatedContent, validationResult.Errors)
 			if err != nil {
 				// For syntax fix failures, log warning but continue with compilation
 				// The compile-fix loop will attempt to fix errors during compilation
 				logger.Warn("syntax fix failed, will rely on compile-fix loop", logger.Err(err))
 			} else {
-				logger.Info("syntax errors fixed successfully")
+				// Check if the fixed content was severely truncated by LLM
+				fixedLineCount := strings.Count(fixedContent, "\n") + 1
+				truncationRatio := float64(fixedLineCount) / float64(originalLineCount)
 				
-				// IMPORTANT: Re-apply reference-based fixes after LLM syntax fix
-				// The LLM may have re-introduced wrongly commented environments
-				// Read original content for reference-based fixes
-				originalMainPath := filepath.Join(sourceInfo.ExtractDir, mainFileName)
-				if originalContent, readErr := os.ReadFile(originalMainPath); readErr == nil {
-					translatedContent = translator.ApplyReferenceBasedFixes(translatedContent, string(originalContent))
-					logger.Info("re-applied reference-based fixes after syntax fix")
+				// If content was truncated by more than 50%, reject the fix
+				if truncationRatio < 0.5 {
+					logger.Warn("LLM syntax fix returned severely truncated content, rejecting fix",
+						logger.Int("originalLines", originalLineCount),
+						logger.Int("fixedLines", fixedLineCount),
+						logger.Float64("ratio", truncationRatio))
+					// Keep original translated content, don't use truncated fix
+				} else {
+					// Accept the fix
+					translatedContent = fixedContent
+					logger.Info("syntax errors fixed successfully",
+						logger.Int("originalLines", originalLineCount),
+						logger.Int("fixedLines", fixedLineCount))
+					
+					// IMPORTANT: Re-apply reference-based fixes after LLM syntax fix
+					// The LLM may have re-introduced wrongly commented environments
+					// Read original content for reference-based fixes
+					originalMainPath := filepath.Join(sourceInfo.ExtractDir, mainFileName)
+					if originalContent, readErr := os.ReadFile(originalMainPath); readErr == nil {
+						translatedContent = translator.ApplyReferenceBasedFixes(translatedContent, string(originalContent))
+						logger.Info("re-applied reference-based fixes after syntax fix")
+					}
+					
+					// Update the main file in translatedFiles
+					translatedFiles[mainFileName] = translatedContent
 				}
-				
-				// Update the main file in translatedFiles
-				translatedFiles[mainFileName] = translatedContent
 			}
 		}
 	} else {
@@ -979,12 +1181,25 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		logger.Int("fileCount", len(translatedFiles)),
 		logger.String("mainFileName", mainFileName))
 
-	// Save all translated files, applying QuickFix to each
+	// Save all translated files, applying QuickFixWithReference to each
 	for relPath, content := range translatedFiles {
-		// Apply QuickFix to fix common translation issues (like lonely \item)
-		fixedContent, wasFixed := compiler.QuickFix(content)
+		// Read original content for reference-based fixes
+		originalPath := filepath.Join(sourceInfo.ExtractDir, relPath)
+		originalContent, err := os.ReadFile(originalPath)
+		var originalStr string
+		if err == nil {
+			originalStr = string(originalContent)
+		} else {
+			logger.Debug("could not read original file for reference fix",
+				logger.String("relPath", relPath),
+				logger.String("error", err.Error()))
+		}
+
+		// Apply QuickFixWithReference to fix common translation issues
+		// This includes fixing wrongly commented environments like \begin{abstract}
+		fixedContent, wasFixed := compiler.QuickFixWithReference(content, originalStr)
 		if wasFixed {
-			logger.Info("applied QuickFix to translated file",
+			logger.Info("applied QuickFixWithReference to translated file",
 				logger.String("relPath", relPath))
 			content = fixedContent
 			translatedFiles[relPath] = content
@@ -1010,6 +1225,27 @@ func (a *App) ProcessSource(input string) (*types.ProcessResult, error) {
 		// IMPORTANT: Fix incomplete tabular column specs AFTER all other fixes
 		// This must be done last because QuickFix might remove the closing braces we add
 		content = translator.FixIncompleteTabularColumnSpec(content)
+		translatedFiles[relPath] = content
+
+		// CRITICAL: Fix split comment lines in preamble AFTER all other fixes
+		// This handles cases where LLM splits "% comment" into two lines:
+		//   Line N:   %
+		//   Line N+1: comment text (without %)
+		// This must be done last because other fixes might re-introduce the problem
+		content = fixSplitCommentLinesInPreamble(content)
+		translatedFiles[relPath] = content
+
+		// CRITICAL: Fix merged comment lines in preamble
+		// This handles cases where LLM merges comment text with the next line:
+		//   Original: "% comment text\n\usepackage{pkg}"
+		//   Broken:   "% comment text\usepackage{pkg}" (on same line)
+		// This must be done after fixSplitCommentLinesInPreamble
+		content = fixMergedCommentLinesInPreamble(content, originalStr)
+		translatedFiles[relPath] = content
+
+		// Add Chinese font support for LuaLaTeX compilation
+		// This is necessary because translated documents contain Chinese characters
+		content = addChineseFontSupport(content)
 		translatedFiles[relPath] = content
 
 		var savePath string
@@ -3220,6 +3456,77 @@ func (z *ZipWriter) Close() error {
 	return z.writer.Close()
 }
 
+// addChineseFontSupport adds Chinese font support to the preamble for LuaLaTeX compilation.
+// This is necessary because translated documents contain Chinese characters that require
+// proper font configuration.
+func addChineseFontSupport(content string) string {
+	// Find \begin{document} position
+	beginDocIdx := strings.Index(content, `\begin{document}`)
+	if beginDocIdx == -1 {
+		logger.Debug("addChineseFontSupport: no \\begin{document} found")
+		return content
+	}
+
+	preamble := content[:beginDocIdx]
+	body := content[beginDocIdx:]
+
+	// Check if Chinese font support is already present
+	if strings.Contains(preamble, `luatexja-fontspec`) || strings.Contains(preamble, `\setCJKmainfont`) {
+		logger.Debug("addChineseFontSupport: Chinese font support already present")
+		return content
+	}
+
+	// Check if fontspec is already loaded
+	hasFontspec := strings.Contains(preamble, `\usepackage{fontspec}`)
+
+	// Chinese font support packages
+	chineseFontSupport := `
+% Chinese font support for LuaLaTeX (auto-added by translator)
+`
+	if !hasFontspec {
+		chineseFontSupport += `\usepackage{fontspec}
+`
+	}
+	chineseFontSupport += `\usepackage{luatexja-fontspec}
+\setmainjfont{SimSun}[BoldFont=SimHei]
+\setsansjfont{SimHei}
+`
+
+	// Find a good insertion point - after \documentclass or after geometry package
+	insertIdx := -1
+
+	// Try to insert after geometry package
+	geometryIdx := strings.Index(preamble, `\usepackage`)
+	if geometryIdx != -1 {
+		// Find the end of the first \usepackage line
+		lineEnd := strings.Index(preamble[geometryIdx:], "\n")
+		if lineEnd != -1 {
+			insertIdx = geometryIdx + lineEnd + 1
+		}
+	}
+
+	// If no good insertion point found, insert right after \documentclass line
+	if insertIdx == -1 {
+		docclassIdx := strings.Index(preamble, `\documentclass`)
+		if docclassIdx != -1 {
+			lineEnd := strings.Index(preamble[docclassIdx:], "\n")
+			if lineEnd != -1 {
+				insertIdx = docclassIdx + lineEnd + 1
+			}
+		}
+	}
+
+	if insertIdx == -1 {
+		// Fallback: insert at the beginning of preamble
+		insertIdx = 0
+	}
+
+	newPreamble := preamble[:insertIdx] + chineseFontSupport + preamble[insertIdx:]
+	logger.Info("added Chinese font support to preamble")
+
+	return newPreamble + body
+}
+
 // fixDuplicateThebibliographyInPreamble removes thebibliography environment from preamble.
 // The thebibliography environment should NEVER be in the preamble (before \begin{document}).
 // This can happen when LLM incorrectly inserts .bbl content during translation.
@@ -3272,6 +3579,275 @@ func fixDuplicateThebibliographyInPreamble(content string) string {
 		logger.Int("removedBytes", bibEndIdx-bibStartIdx))
 
 	return newPreamble + body
+}
+
+// fixSplitCommentLinesInPreamble fixes cases where LLM translation incorrectly splits
+// comment lines in the preamble, putting "%" on one line and the comment text on the next.
+// This is critical because uncommented text in the preamble causes "Missing \begin{document}" errors.
+//
+// Pattern detected:
+//
+//	Line N:   % (or "% ")
+//	Line N+1: comment text (without %)
+//
+// This function merges such split lines or comments the orphaned text.
+func fixSplitCommentLinesInPreamble(content string) string {
+	// Find \begin{document}
+	beginDocIdx := strings.Index(content, `\begin{document}`)
+	if beginDocIdx == -1 {
+		return content
+	}
+
+	preamble := content[:beginDocIdx]
+	body := content[beginDocIdx:]
+
+	lines := strings.Split(preamble, "\n")
+	fixed := false
+
+	// Common comment indicators that suggest a line should be commented
+	commentIndicators := []string{
+		"recommended", "optional", "packages", "figures", "typesetting",
+		"hyperref", "hyperlinks", "resulting", "build breaks",
+		"comment out", "following", "attempt", "algorithmic",
+		"initial blind", "submitted", "review", "preprint",
+		"accepted", "camera-ready", "submission", "setting:",
+		"above.", "better", "work together", "for the",
+		"use the", "instead use", "if accepted", "for preprint",
+		"spans a page", "please comment", "use the following",
+		"with \\usepackage", "nohyperref",
+	}
+
+	// Process lines to fix split comments
+	for i := 0; i < len(lines)-1; i++ {
+		trimmed := strings.TrimSpace(lines[i])
+
+		// Check if this line is just "%" or "% " (isolated percent sign)
+		if trimmed == "%" || trimmed == "% " {
+			// Check the next line
+			nextLine := lines[i+1]
+			nextTrimmed := strings.TrimSpace(nextLine)
+
+			// Skip if next line is empty or already commented
+			if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "%") {
+				continue
+			}
+
+			// Check if next line looks like comment text
+			lowerNext := strings.ToLower(nextTrimmed)
+			shouldComment := false
+
+			for _, indicator := range commentIndicators {
+				if strings.Contains(lowerNext, indicator) {
+					shouldComment = true
+					break
+				}
+			}
+
+			// Special case: line starts with a LaTeX command but contains comment-like text
+			// e.g., "\usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above."
+			// This should be fully commented
+			if strings.HasPrefix(nextTrimmed, "\\") {
+				// Check if it contains comment indicators
+				for _, indicator := range commentIndicators {
+					if strings.Contains(lowerNext, indicator) {
+						shouldComment = true
+						break
+					}
+				}
+			}
+
+			// Also check if the line doesn't look like valid LaTeX
+			// (no backslash commands, no braces at start)
+			if !shouldComment && !strings.HasPrefix(nextTrimmed, "\\") {
+				if !strings.ContainsAny(nextTrimmed[:min(10, len(nextTrimmed))], "\\{}$") {
+					// Line starts with regular text - likely a comment
+					if len(nextTrimmed) > 5 {
+						shouldComment = true
+					}
+				}
+			}
+
+			if shouldComment {
+				// Comment the next line
+				leadingWhitespace := nextLine[:len(nextLine)-len(strings.TrimLeft(nextLine, " \t"))]
+				lines[i+1] = leadingWhitespace + "% " + nextTrimmed
+				fixed = true
+				logger.Info("fixSplitCommentLinesInPreamble: commented orphaned text",
+					logger.Int("lineNum", i+1),
+					logger.String("text", nextTrimmed[:min(50, len(nextTrimmed))]))
+			}
+		}
+	}
+
+	if fixed {
+		return strings.Join(lines, "\n") + body
+	}
+
+	return content
+}
+
+// fixMergedCommentLinesInPreamble fixes cases where LLM translation incorrectly merges
+// comment text with the next line in the preamble.
+// This is critical because it can cause LaTeX commands to be commented out or syntax errors.
+//
+// Pattern detected:
+//
+//	Original: "% comment text\n\usepackage{pkg}"
+//	Broken:   "% comment text\usepackage{pkg}" (merged on same line)
+//
+// This function splits such merged lines back into separate lines by comparing with original.
+func fixMergedCommentLinesInPreamble(content, original string) string {
+	if original == "" {
+		return content
+	}
+
+	// Find \begin{document}
+	beginDocIdx := strings.Index(content, `\begin{document}`)
+	if beginDocIdx == -1 {
+		return content
+	}
+
+	origBeginDocIdx := strings.Index(original, `\begin{document}`)
+	if origBeginDocIdx == -1 {
+		return content
+	}
+
+	preamble := content[:beginDocIdx]
+	body := content[beginDocIdx:]
+	origPreamble := original[:origBeginDocIdx]
+
+	lines := strings.Split(preamble, "\n")
+	origLines := strings.Split(origPreamble, "\n")
+	fixed := false
+
+	// Build a set of lines from original that are pure comment lines (not commenting out code)
+	// A pure comment line is one where the text after % doesn't start with a LaTeX command
+	origPureCommentLines := make(map[string]bool)
+	for _, line := range origLines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "%") && !strings.HasPrefix(trimmed, "%%") {
+			// Check if this is a pure comment (not commenting out a command)
+			afterPercent := strings.TrimSpace(strings.TrimPrefix(trimmed, "%"))
+			if afterPercent != "" && !strings.HasPrefix(afterPercent, "\\") {
+				// This is a pure comment line (text, not a commented-out command)
+				origPureCommentLines[trimmed] = true
+			}
+		}
+	}
+
+	// Build a set of uncommented lines from original (lines that should NOT be commented)
+	origUncommentedLines := make(map[string]bool)
+	for _, line := range origLines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "%") {
+			origUncommentedLines[trimmed] = true
+		}
+	}
+
+	// Now check each line in the translated preamble
+	var newLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		leadingWhitespace := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+
+		// Case 1: Check for non-comment lines that have comment text merged with a command
+		// Pattern: "above.\usepackage{...}" or "following:\newcommand{...}"
+		// These are cases where comment continuation text lost its % and got merged with the next line
+		if !strings.HasPrefix(trimmed, "%") && !strings.HasPrefix(trimmed, "\\") && len(trimmed) > 5 {
+			// Look for text followed by a LaTeX command
+			textCmdPattern := regexp.MustCompile(`^([^\\]+)(\\[a-zA-Z]+.*)$`)
+			if matches := textCmdPattern.FindStringSubmatch(trimmed); len(matches) == 3 {
+				textPart := strings.TrimSpace(matches[1])
+				commandPart := strings.TrimSpace(matches[2])
+
+				// Check if the text part looks like comment continuation
+				// (ends with punctuation or common comment words)
+				lowerText := strings.ToLower(textPart)
+				isCommentContinuation := false
+
+				// Check for common comment endings
+				commentEndings := []string{":", ".", ",", "above", "below", "following", "use", "instead"}
+				for _, ending := range commentEndings {
+					if strings.HasSuffix(lowerText, ending) {
+						isCommentContinuation = true
+						break
+					}
+				}
+
+				// Also check if the command part exists as an uncommented line in original
+				commandExistsInOrig := false
+				for origLine := range origUncommentedLines {
+					if strings.HasPrefix(origLine, commandPart) || strings.HasPrefix(commandPart, origLine) {
+						commandExistsInOrig = true
+						break
+					}
+				}
+
+				if isCommentContinuation && commandExistsInOrig {
+					// Split: comment the text part, keep command uncommented
+					newLines = append(newLines, leadingWhitespace+"% "+textPart)
+					newLines = append(newLines, leadingWhitespace+commandPart)
+					fixed = true
+					logger.Info("fixMergedCommentLinesInPreamble: split and commented merged line",
+						logger.String("text", textPart),
+						logger.String("command", commandPart))
+					continue
+				}
+			}
+		}
+
+		// Case 2: Check for comment lines where comment text is merged with a command
+		// Pattern: "% comment text\usepackage{...}"
+		// But NOT: "% \usepackage{...}" (this is intentionally commented out)
+		if strings.HasPrefix(trimmed, "%") && !strings.HasPrefix(trimmed, "%%") {
+			afterPercent := strings.TrimSpace(strings.TrimPrefix(trimmed, "%"))
+
+			// Skip if this is a commented-out command (starts with \)
+			if strings.HasPrefix(afterPercent, "\\") {
+				newLines = append(newLines, line)
+				continue
+			}
+
+			// Look for pattern: "text \command" or "text\command"
+			// The text part should have at least 3 characters of actual text
+			mergedPattern := regexp.MustCompile(`^(.{3,}?)(\\[a-zA-Z]+.*)$`)
+			if matches := mergedPattern.FindStringSubmatch(afterPercent); len(matches) == 3 {
+				textPart := strings.TrimSpace(matches[1])
+				commandPart := strings.TrimSpace(matches[2])
+
+				// Verify this is a real merge by checking:
+				// 1. The text part looks like comment text (not just whitespace or symbols)
+				// 2. The command part exists as an uncommented line in original
+				hasLetters := regexp.MustCompile(`[a-zA-Z]{2,}`).MatchString(textPart)
+				commandExistsInOrig := false
+				for origLine := range origUncommentedLines {
+					if strings.HasPrefix(origLine, commandPart) || strings.HasPrefix(commandPart, origLine) {
+						commandExistsInOrig = true
+						break
+					}
+				}
+
+				if hasLetters && commandExistsInOrig {
+					// Split the line: keep comment part as comment, uncomment the command
+					newLines = append(newLines, leadingWhitespace+"% "+textPart)
+					newLines = append(newLines, leadingWhitespace+commandPart)
+					fixed = true
+					logger.Info("fixMergedCommentLinesInPreamble: split merged comment line",
+						logger.String("comment", textPart),
+						logger.String("command", commandPart))
+					continue
+				}
+			}
+		}
+
+		newLines = append(newLines, line)
+	}
+
+	if fixed {
+		return strings.Join(newLines, "\n") + body
+	}
+
+	return content
 }
 
 // ensureCtexPackage ensures the ctex package is included in the LaTeX document for Chinese support.
@@ -5379,4 +5955,295 @@ func (a *App) checkPageCountDifference(originalPDFPath, translatedPDFPath string
 	}
 
 	return result
+}
+
+// ============================================================================
+// License-related Wails binding methods
+// Validates: Requirements 1.4, 1.5, 3.3, 3.4, 8.1, 8.2, 8.3
+// ============================================================================
+
+// ActivationResult represents the result of license activation
+type ActivationResult struct {
+	Success   bool   `json:"success"`
+	Message   string `json:"message"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
+// LicenseDisplayInfo represents license info for display in the about page
+type LicenseDisplayInfo struct {
+	WorkMode       string `json:"work_mode"`
+	SerialNumber   string `json:"serial_number,omitempty"`   // 激活所用序列号
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	DailyAnalysis  int    `json:"daily_analysis,omitempty"` // 每日分析次数限制，0 表示无限制
+	DaysRemaining  int    `json:"days_remaining,omitempty"`
+	IsExpiringSoon bool   `json:"is_expiring_soon,omitempty"`
+}
+
+// RequestSNResult represents the result of a serial number request
+type RequestSNResult struct {
+	Success      bool   `json:"success"`
+	Message      string `json:"message"`
+	SerialNumber string `json:"serial_number,omitempty"` // 分配的序列号（仅成功时返回）
+}
+
+// LicenseValidityResult represents the result of license validity check
+type LicenseValidityResult struct {
+	IsValid        bool   `json:"is_valid"`
+	IsExpired      bool   `json:"is_expired"`
+	IsExpiringSoon bool   `json:"is_expiring_soon"`
+	Message        string `json:"message"`
+}
+
+// GetWorkMode returns the current work mode.
+// Returns empty string if no work mode is configured.
+// Validates: Requirements 1.4, 1.5
+func (a *App) GetWorkMode() string {
+	if a.config == nil {
+		return ""
+	}
+	return string(a.config.GetWorkMode())
+}
+
+// SetWorkMode sets the work mode.
+// Validates: Requirements 1.4, 1.5
+func (a *App) SetWorkMode(mode string) error {
+	if a.config == nil {
+		return fmt.Errorf("配置管理器未初始化")
+	}
+	return a.config.SetWorkMode(license.WorkMode(mode))
+}
+
+// ActivateLicense activates a commercial license with the given serial number.
+// On success, it saves the license info to config.
+// Validates: Requirements 3.3, 3.4
+func (a *App) ActivateLicense(serialNumber string) (*ActivationResult, error) {
+	if a.licenseClient == nil {
+		return nil, fmt.Errorf("授权客户端未初始化")
+	}
+	if a.config == nil {
+		return nil, fmt.Errorf("配置管理器未初始化")
+	}
+
+	logger.Info("activating license", logger.String("serialNumber", "****-****-****-"+serialNumber[len(serialNumber)-4:]))
+
+	// Call the license client to activate
+	resp, activationData, err := a.licenseClient.Activate(serialNumber)
+	if err != nil {
+		logger.Error("license activation failed", err)
+		return &ActivationResult{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+
+	// Save license info to config
+	licenseInfo := &license.LicenseInfo{
+		WorkMode:       license.WorkModeCommercial,
+		SerialNumber:   serialNumber,
+		ActivationData: activationData,
+		ActivatedAt:    time.Now(),
+	}
+
+	if err := a.config.SetLicenseInfo(licenseInfo); err != nil {
+		logger.Error("failed to save license info", err)
+		return &ActivationResult{
+			Success: false,
+			Message: "激活成功但保存配置失败: " + err.Error(),
+		}, nil
+	}
+
+	// Set work mode to commercial
+	if err := a.config.SetWorkMode(license.WorkModeCommercial); err != nil {
+		logger.Error("failed to set work mode", err)
+		return &ActivationResult{
+			Success: false,
+			Message: "激活成功但设置工作模式失败: " + err.Error(),
+		}, nil
+	}
+
+	// Apply the LLM config from the license to translator, validator, and PDF translator
+	// This is critical - without this, the translator will use old/empty API key
+	a.applyLicenseLLMConfig()
+
+	logger.Info("license activated successfully", logger.String("expiresAt", resp.ExpiresAt))
+
+	return &ActivationResult{
+		Success:   true,
+		Message:   "激活成功",
+		ExpiresAt: resp.ExpiresAt,
+	}, nil
+}
+
+// RequestSerialNumber requests a serial number via email.
+// Returns a structured result containing success status, message, and serial number if available.
+// Validates: Requirements 3.8
+func (a *App) RequestSerialNumber(email string) (*RequestSNResult, error) {
+	if a.licenseClient == nil {
+		return nil, fmt.Errorf("授权客户端未初始化")
+	}
+
+	logger.Info("requesting serial number", logger.String("email", email))
+
+	result, err := a.licenseClient.RequestSN(email)
+	if err != nil {
+		logger.Error("serial number request failed", err)
+		return nil, err
+	}
+
+	logger.Info("serial number request submitted", 
+		logger.String("message", result.Message),
+		logger.Bool("hasSN", result.SerialNumber != ""))
+	
+	return &RequestSNResult{
+		Success:      result.Success,
+		Message:      result.Message,
+		SerialNumber: result.SerialNumber,
+	}, nil
+}
+
+// GetLicenseInfo returns license information for display in the about page.
+// Validates: Requirements 8.1, 8.2, 8.3, 10.1, 10.2, 10.3, 10.4, 10.5
+func (a *App) GetLicenseInfo() (*LicenseDisplayInfo, error) {
+	if a.config == nil {
+		return nil, fmt.Errorf("配置管理器未初始化")
+	}
+
+	workMode := a.config.GetWorkMode()
+	info := &LicenseDisplayInfo{
+		WorkMode: string(workMode),
+	}
+
+	// For opensource mode, just return the work mode
+	if workMode != license.WorkModeCommercial {
+		return info, nil
+	}
+
+	// For commercial mode, get license details
+	licenseInfo := a.config.GetLicenseInfo()
+	if licenseInfo == nil || licenseInfo.ActivationData == nil {
+		return info, nil
+	}
+
+	// Add serial number (masked for security - show only last 4 characters)
+	if licenseInfo.SerialNumber != "" {
+		sn := licenseInfo.SerialNumber
+		if len(sn) > 4 {
+			info.SerialNumber = "****-****-****-" + sn[len(sn)-4:]
+		} else {
+			info.SerialNumber = sn
+		}
+	}
+
+	activationData := licenseInfo.ActivationData
+	info.ExpiresAt = activationData.ExpiresAt
+	info.DailyAnalysis = activationData.DailyAnalysis
+
+	// Calculate days remaining and expiring soon status
+	if a.licenseClient != nil {
+		daysRemaining := a.licenseClient.DaysUntilExpiry(activationData)
+		info.DaysRemaining = daysRemaining
+		info.IsExpiringSoon = daysRemaining >= 0 && daysRemaining <= 7
+	}
+
+	return info, nil
+}
+
+// CheckLicenseValidity checks if the current license is valid.
+// Validates: Requirements 8.1, 8.2, 8.3
+func (a *App) CheckLicenseValidity() (*LicenseValidityResult, error) {
+	if a.config == nil {
+		return nil, fmt.Errorf("配置管理器未初始化")
+	}
+
+	// Get work mode status from config manager
+	status := a.config.GetWorkModeStatus()
+
+	result := &LicenseValidityResult{
+		IsValid:        status.HasValidLicense,
+		IsExpired:      status.LicenseExpired,
+		IsExpiringSoon: status.LicenseExpiringSoon,
+	}
+
+	// Generate appropriate message
+	if !status.HasWorkMode {
+		result.Message = "未选择工作模式"
+	} else if status.IsOpenSource {
+		result.IsValid = true
+		result.Message = "开源软件模式"
+	} else if status.IsCommercial {
+		if status.LicenseExpired {
+			result.Message = "授权已过期，请重新激活或切换到开源模式"
+		} else if status.LicenseExpiringSoon {
+			result.Message = fmt.Sprintf("授权将在 %d 天后过期，请及时续费", status.DaysUntilExpiry)
+		} else if status.HasValidLicense {
+			result.Message = "授权有效"
+		} else {
+			result.Message = "授权无效，请重新激活"
+		}
+	}
+
+	return result, nil
+}
+
+// RefreshLicense refreshes the license by re-activating with the stored serial number.
+// This fetches the latest license data from the server.
+// Returns the updated license display info on success.
+func (a *App) RefreshLicense() (*LicenseDisplayInfo, error) {
+	if a.config == nil {
+		return nil, fmt.Errorf("配置管理器未初始化")
+	}
+	if a.licenseClient == nil {
+		return nil, fmt.Errorf("授权客户端未初始化")
+	}
+
+	// Check if we're in commercial mode
+	workMode := a.config.GetWorkMode()
+	if workMode != license.WorkModeCommercial {
+		return nil, fmt.Errorf("当前不是商业授权模式")
+	}
+
+	// Get the stored license info
+	licenseInfo := a.config.GetLicenseInfo()
+	if licenseInfo == nil {
+		logger.Warn("license info is nil")
+		return nil, fmt.Errorf("未找到已保存的授权信息")
+	}
+	
+	if licenseInfo.SerialNumber == "" {
+		logger.Warn("serial number is empty in license info")
+		return nil, fmt.Errorf("未找到已保存的序列号")
+	}
+
+	serialNumber := licenseInfo.SerialNumber
+	logger.Info("refreshing license", 
+		logger.String("serialNumber", serialNumber),
+		logger.Int("snLength", len(serialNumber)))
+
+	// Re-activate with the stored serial number
+	resp, activationData, err := a.licenseClient.Activate(serialNumber)
+	if err != nil {
+		logger.Error("license refresh failed", err)
+		return nil, fmt.Errorf("刷新授权失败: %v", err)
+	}
+
+	// Update license info in config
+	newLicenseInfo := &license.LicenseInfo{
+		WorkMode:       license.WorkModeCommercial,
+		SerialNumber:   serialNumber,
+		ActivationData: activationData,
+		ActivatedAt:    time.Now(),
+	}
+
+	if err := a.config.SetLicenseInfo(newLicenseInfo); err != nil {
+		logger.Error("failed to save refreshed license info", err)
+		return nil, fmt.Errorf("保存授权信息失败: %v", err)
+	}
+
+	// Apply the new LLM config from the refreshed license
+	a.applyLicenseLLMConfig()
+
+	logger.Info("license refreshed successfully", logger.String("expiresAt", resp.ExpiresAt))
+
+	// Return the updated license display info
+	return a.GetLicenseInfo()
 }

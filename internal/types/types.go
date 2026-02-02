@@ -3,6 +3,7 @@ package types
 
 // Config 应用配置
 type Config struct {
+	// OpenAI/LLM 配置 (开源模式使用)
 	OpenAIAPIKey    string `json:"openai_api_key"`
 	OpenAIBaseURL   string `json:"openai_base_url"`   // OpenAI 兼容 API 的 Base URL
 	OpenAIModel     string `json:"openai_model"`
@@ -20,6 +21,11 @@ type Config struct {
 	LibraryPageSize int    `json:"library_page_size"` // 浏览库每页显示数量，默认20
 	// 分享提示配置
 	SharePromptEnabled bool `json:"share_prompt_enabled"` // 翻译完成后是否提示分享，默认true
+	
+	// 授权配置 (商业模式使用)
+	WorkMode             string `json:"work_mode,omitempty"`              // 工作模式: commercial 或 opensource
+	SerialNumber         string `json:"serial_number,omitempty"`          // 商业模式序列号 (用于解密)
+	EncryptedLicenseInfo string `json:"encrypted_license_info,omitempty"` // 加密的授权信息
 }
 
 // InputHistoryItem 输入历史记录项

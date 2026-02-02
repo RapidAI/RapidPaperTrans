@@ -194,6 +194,22 @@ export namespace github {
 
 export namespace main {
 	
+	export class ActivationResult {
+	    success: boolean;
+	    message: string;
+	    expires_at?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ActivationResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.message = source["message"];
+	        this.expires_at = source["expires_at"];
+	    }
+	}
 	export class ArxivPaperMetadata {
 	    arxiv_id: string;
 	    title: string;
@@ -230,6 +246,46 @@ export namespace main {
 	        this.message = source["message"];
 	    }
 	}
+	export class LicenseDisplayInfo {
+	    work_mode: string;
+	    serial_number?: string;
+	    expires_at?: string;
+	    daily_analysis?: number;
+	    days_remaining?: number;
+	    is_expiring_soon?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new LicenseDisplayInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.work_mode = source["work_mode"];
+	        this.serial_number = source["serial_number"];
+	        this.expires_at = source["expires_at"];
+	        this.daily_analysis = source["daily_analysis"];
+	        this.days_remaining = source["days_remaining"];
+	        this.is_expiring_soon = source["is_expiring_soon"];
+	    }
+	}
+	export class LicenseValidityResult {
+	    is_valid: boolean;
+	    is_expired: boolean;
+	    is_expiring_soon: boolean;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new LicenseValidityResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.is_valid = source["is_valid"];
+	        this.is_expired = source["is_expired"];
+	        this.is_expiring_soon = source["is_expiring_soon"];
+	        this.message = source["message"];
+	    }
+	}
 	export class PaperListItem {
 	    arxiv_id: string;
 	    title: string;
@@ -244,6 +300,22 @@ export namespace main {
 	        this.arxiv_id = source["arxiv_id"];
 	        this.title = source["title"];
 	        this.translated_at = source["translated_at"];
+	    }
+	}
+	export class RequestSNResult {
+	    success: boolean;
+	    message: string;
+	    serial_number?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new RequestSNResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.success = source["success"];
+	        this.message = source["message"];
+	        this.serial_number = source["serial_number"];
 	    }
 	}
 	export class ShareCheckResult {
@@ -640,6 +712,9 @@ export namespace types {
 	    github_repo: string;
 	    library_page_size: number;
 	    share_prompt_enabled: boolean;
+	    work_mode?: string;
+	    serial_number?: string;
+	    encrypted_license_info?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Config(source);
@@ -661,6 +736,9 @@ export namespace types {
 	        this.github_repo = source["github_repo"];
 	        this.library_page_size = source["library_page_size"];
 	        this.share_prompt_enabled = source["share_prompt_enabled"];
+	        this.work_mode = source["work_mode"];
+	        this.serial_number = source["serial_number"];
+	        this.encrypted_license_info = source["encrypted_license_info"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

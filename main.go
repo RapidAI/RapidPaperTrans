@@ -219,13 +219,23 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 1},
 		OnStartup:        startupFunc,
 		OnBeforeClose: func(ctx context.Context) (prevent bool) {
-			// Check if there's a translation task in progress
-			if app.IsProcessing() {
+			// Check if there's any translation task in progress (LaTeX or PDF)
+			if app.IsAnyTranslationInProgress() {
+				// Determine which type of translation is in progress for the message
+				var taskType string
+				if app.IsProcessing() && app.IsPDFTranslating() {
+					taskType = "LaTeX 和 PDF 翻译任务"
+				} else if app.IsProcessing() {
+					taskType = "LaTeX 翻译任务"
+				} else {
+					taskType = "PDF 翻译任务"
+				}
+				
 				// Show confirmation dialog
 				result, err := runtime.MessageDialog(ctx, runtime.MessageDialogOptions{
 					Type:          runtime.QuestionDialog,
 					Title:         "确认退出",
-					Message:       "翻译任务正在进行中，确定要退出吗？\n退出后当前任务将被取消。",
+					Message:       fmt.Sprintf("%s正在进行中，确定要退出吗？\n退出后当前任务将被取消。", taskType),
 					Buttons:       []string{"取消", "退出"},
 					DefaultButton: "取消",
 					CancelButton:  "取消",
@@ -238,8 +248,9 @@ func main() {
 				if result == "取消" {
 					return true
 				}
-				// User clicked "退出" (Exit), cancel the process and allow close
+				// User clicked "退出" (Exit), cancel the processes and allow close
 				app.CancelProcess()
+				app.CancelPDFTranslation()
 			}
 			return false
 		},

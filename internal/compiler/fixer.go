@@ -1309,9 +1309,9 @@ func fixUnbalancedBracesAtEnd(content string) (string, bool) {
 		return content, false
 	}
 	
-	// Only fix if the difference is reasonable (< 20 missing braces)
+	// Only fix if the difference is reasonable (< 50 missing braces)
 	// Larger differences likely indicate a more serious structural problem
-	if diff > 20 {
+	if diff > 50 {
 		logger.Warn("too many missing closing braces, skipping auto-fix",
 			logger.Int("openBraces", openBraces),
 			logger.Int("closeBraces", closeBraces),

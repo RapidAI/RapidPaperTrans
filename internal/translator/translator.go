@@ -259,11 +259,18 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 		}, nil
 	}
 
+	// Protect comment environments - they should not be translated
+	// The comment package in LaTeX treats everything between \begin{comment} and \end{comment} as comments
+	contentWithProtectedComments, commentPlaceholders := protectCommentEnvironments(content)
+	if len(commentPlaceholders) > 0 {
+		logger.Info("protected comment environments", logger.Int("count", len(commentPlaceholders)))
+	}
+
 	// Note: Caption pre-translation is disabled for now because it may cause issues
 	// with the main translation flow. The table/figure environments are protected
 	// in protectedEnvNames, so their structure will be preserved.
 	// TODO: Re-enable caption translation after fixing the issues
-	contentWithTranslatedCaptions := content
+	contentWithTranslatedCaptions := contentWithProtectedComments
 
 	// Note: Preprocessing (comment removal) is disabled for now because:
 	// 1. Some documents have intentionally commented-out code that affects structure
@@ -368,6 +375,12 @@ func (t *TranslationEngine) TranslateTeXWithProgress(content string, progressCal
 
 	// Join translated chunks back together
 	translatedContent := strings.Join(translatedChunks, "")
+
+	// Restore protected comment environments
+	if len(commentPlaceholders) > 0 {
+		translatedContent = restoreCommentEnvironments(translatedContent, commentPlaceholders)
+		logger.Info("restored comment environments", logger.Int("count", len(commentPlaceholders)))
+	}
 
 	// Final fixes on the complete translated content
 	// Fix LaTeX line structure issues caused by LLM merging lines
@@ -662,33 +675,441 @@ func validatePlaceholders(content string, placeholders map[string]string) []stri
 	return missing
 }
 
-// recoverMissingPlaceholders attempts to recover missing placeholders by inserting them
-// at the end of the content. This is a fallback mechanism when LLM drops placeholders.
+// RecoveryStrategy represents the strategy used to recover a placeholder
+// Validates: Requirements 1.5
+type RecoveryStrategy string
+
+const (
+	// RecoveryStrategyPatternMatch - recovered by finding similar pattern in content
+	RecoveryStrategyPatternMatch RecoveryStrategy = "pattern_match"
+	// RecoveryStrategyLineBased - recovered by analyzing line structure
+	RecoveryStrategyLineBased RecoveryStrategy = "line_based"
+	// RecoveryStrategyContextBefore - recovered using context before the placeholder
+	RecoveryStrategyContextBefore RecoveryStrategy = "context_before"
+	// RecoveryStrategyContextAfter - recovered using context after the placeholder
+	RecoveryStrategyContextAfter RecoveryStrategy = "context_after"
+	// RecoveryStrategyAppend - fallback: appended at the end
+	RecoveryStrategyAppend RecoveryStrategy = "append"
+	// RecoveryStrategyFailed - recovery failed
+	RecoveryStrategyFailed RecoveryStrategy = "failed"
+)
+
+// RecoveryAttempt represents a single recovery attempt for a placeholder
+// Validates: Requirements 1.5
+type RecoveryAttempt struct {
+	Placeholder    string           // The placeholder being recovered
+	Original       string           // The original content the placeholder represents
+	Strategy       RecoveryStrategy // The strategy used for recovery
+	InsertPosition int              // Position where the placeholder was inserted (-1 if appended)
+	Success        bool             // Whether the recovery was successful
+	Message        string           // Additional information about the recovery
+}
+
+// RecoveryReport tracks all recovery attempts and their results
+// Validates: Requirements 1.5
+type RecoveryReport struct {
+	TotalMissing     int               // Total number of missing placeholders
+	TotalRecovered   int               // Number of successfully recovered placeholders
+	TotalFailed      int               // Number of failed recovery attempts
+	Attempts         []RecoveryAttempt // Individual recovery attempts
+	StrategiesUsed   map[RecoveryStrategy]int // Count of each strategy used
+	ProcessingTimeMs int64             // Time taken for recovery in milliseconds
+}
+
+// NewRecoveryReport creates a new recovery report
+func NewRecoveryReport() *RecoveryReport {
+	return &RecoveryReport{
+		Attempts:       make([]RecoveryAttempt, 0),
+		StrategiesUsed: make(map[RecoveryStrategy]int),
+	}
+}
+
+// AddAttempt adds a recovery attempt to the report
+func (r *RecoveryReport) AddAttempt(attempt RecoveryAttempt) {
+	r.Attempts = append(r.Attempts, attempt)
+	r.StrategiesUsed[attempt.Strategy]++
+	if attempt.Success {
+		r.TotalRecovered++
+	} else {
+		r.TotalFailed++
+	}
+}
+
+// LogReport logs the recovery report details
+func (r *RecoveryReport) LogReport() {
+	logger.Info("placeholder recovery report",
+		logger.Int("totalMissing", r.TotalMissing),
+		logger.Int("totalRecovered", r.TotalRecovered),
+		logger.Int("totalFailed", r.TotalFailed),
+		logger.Int64("processingTimeMs", r.ProcessingTimeMs))
+	
+	for strategy, count := range r.StrategiesUsed {
+		logger.Debug("recovery strategy usage",
+			logger.String("strategy", string(strategy)),
+			logger.Int("count", count))
+	}
+	
+	for _, attempt := range r.Attempts {
+		if attempt.Success {
+			logger.Debug("recovery attempt succeeded",
+				logger.String("placeholder", attempt.Placeholder),
+				logger.String("strategy", string(attempt.Strategy)),
+				logger.Int("insertPosition", attempt.InsertPosition),
+				logger.String("message", attempt.Message))
+		} else {
+			logger.Warn("recovery attempt failed",
+				logger.String("placeholder", attempt.Placeholder),
+				logger.String("strategy", string(attempt.Strategy)),
+				logger.String("message", attempt.Message))
+		}
+	}
+}
+
+// recoverMissingPlaceholders attempts to recover missing placeholders using multiple strategies.
+// This is a standalone function that can be used independently of PlaceholderSystem.
+// Validates: Requirements 1.5
 func recoverMissingPlaceholders(content string, placeholders map[string]string, missing []string) string {
+	result, _ := recoverMissingPlaceholdersWithReport(content, "", placeholders, missing)
+	return result
+}
+
+// recoverMissingPlaceholdersWithContext attempts to recover missing placeholders using context analysis.
+// This is a standalone function that uses the original content for better recovery.
+// Validates: Requirements 1.5
+func recoverMissingPlaceholdersWithContext(content string, originalContent string, placeholders map[string]string, missing []string) string {
+	result, _ := recoverMissingPlaceholdersWithReport(content, originalContent, placeholders, missing)
+	return result
+}
+
+// recoverMissingPlaceholdersWithReport attempts to recover missing placeholders and returns a detailed report.
+// This is the main recovery function that implements multiple strategies.
+// Validates: Requirements 1.5
+func recoverMissingPlaceholdersWithReport(content string, originalContent string, placeholders map[string]string, missing []string) (string, *RecoveryReport) {
+	report := NewRecoveryReport()
+	report.TotalMissing = len(missing)
+	
 	if len(missing) == 0 {
-		return content
+		return content, report
 	}
 
+	startTime := time.Now()
+	
 	// Sort missing placeholders by their number to maintain order
-	sort.Slice(missing, func(i, j int) bool {
-		// Extract numbers from placeholder names
-		var numI, numJ int
-		fmt.Sscanf(missing[i], "<<<LATEX_CMD_%d>>>", &numI)
-		fmt.Sscanf(missing[j], "<<<LATEX_CMD_%d>>>", &numJ)
+	sortedMissing := sortPlaceholdersByNumber(missing)
+
+	result := content
+	
+	for _, placeholder := range sortedMissing {
+		original, exists := placeholders[placeholder]
+		if !exists {
+			report.AddAttempt(RecoveryAttempt{
+				Placeholder: placeholder,
+				Strategy:    RecoveryStrategyFailed,
+				Success:     false,
+				Message:     "placeholder not found in mapping",
+			})
+			continue
+		}
+
+		// Try multiple recovery strategies in order of preference
+		recovered, attempt := tryRecoveryStrategies(result, originalContent, placeholder, original)
+		result = recovered
+		report.AddAttempt(attempt)
+	}
+
+	report.ProcessingTimeMs = time.Since(startTime).Milliseconds()
+	report.LogReport()
+	
+	return result, report
+}
+
+// sortPlaceholdersByNumber sorts placeholders by their numeric index
+func sortPlaceholdersByNumber(missing []string) []string {
+	sorted := make([]string, len(missing))
+	copy(sorted, missing)
+	
+	sort.Slice(sorted, func(i, j int) bool {
+		numI := extractPlaceholderNumber(sorted[i])
+		numJ := extractPlaceholderNumber(sorted[j])
 		return numI < numJ
 	})
+	
+	return sorted
+}
 
-	// Append missing placeholders at the end with a warning comment
-	result := content
-	for _, placeholder := range missing {
-		// Try to find a good insertion point based on the placeholder number
-		// For now, just append at the end
-		result += " " + placeholder
-		logger.Warn("recovered missing placeholder by appending",
-			logger.String("placeholder", placeholder))
+// extractPlaceholderNumber extracts the numeric index from a placeholder
+func extractPlaceholderNumber(placeholder string) int {
+	patterns := []string{
+		"<<<LATEX_CMD_%d>>>",
+		"<<<LATEX_MATH_%d>>>",
+		"<<<LATEX_ENV_%d>>>",
+		"<<<LATEX_TABLE_%d>>>",
+		"<<<LATEX_COMMENT_%d>>>",
+	}
+	
+	for _, pattern := range patterns {
+		var num int
+		if n, err := fmt.Sscanf(placeholder, pattern, &num); n == 1 && err == nil {
+			return num
+		}
+	}
+	return 0
+}
+
+// tryRecoveryStrategies attempts multiple recovery strategies for a single placeholder
+func tryRecoveryStrategies(content string, originalContent string, placeholder string, original string) (string, RecoveryAttempt) {
+	attempt := RecoveryAttempt{
+		Placeholder: placeholder,
+		Original:    original,
 	}
 
-	return result
+	// Strategy 1: Pattern matching - look for similar LaTeX patterns
+	if recovered, pos, ok := tryPatternMatchRecovery(content, placeholder, original); ok {
+		attempt.Strategy = RecoveryStrategyPatternMatch
+		attempt.InsertPosition = pos
+		attempt.Success = true
+		attempt.Message = fmt.Sprintf("found similar pattern at position %d", pos)
+		logger.Debug("recovered placeholder using pattern match",
+			logger.String("placeholder", placeholder),
+			logger.Int("position", pos))
+		return recovered, attempt
+	}
+
+	// Strategy 2: Line-based recovery - analyze line structure
+	if recovered, pos, ok := tryLineBasedRecovery(content, originalContent, placeholder, original); ok {
+		attempt.Strategy = RecoveryStrategyLineBased
+		attempt.InsertPosition = pos
+		attempt.Success = true
+		attempt.Message = fmt.Sprintf("found appropriate line position at %d", pos)
+		logger.Debug("recovered placeholder using line-based analysis",
+			logger.String("placeholder", placeholder),
+			logger.Int("position", pos))
+		return recovered, attempt
+	}
+
+	// Strategy 3: Context before - use text before the placeholder in original
+	if originalContent != "" {
+		if recovered, pos, ok := tryContextBeforeRecovery(content, originalContent, placeholder, original); ok {
+			attempt.Strategy = RecoveryStrategyContextBefore
+			attempt.InsertPosition = pos
+			attempt.Success = true
+			attempt.Message = fmt.Sprintf("found context match before position %d", pos)
+			logger.Debug("recovered placeholder using context before",
+				logger.String("placeholder", placeholder),
+				logger.Int("position", pos))
+			return recovered, attempt
+		}
+	}
+
+	// Strategy 4: Context after - use text after the placeholder in original
+	if originalContent != "" {
+		if recovered, pos, ok := tryContextAfterRecovery(content, originalContent, placeholder, original); ok {
+			attempt.Strategy = RecoveryStrategyContextAfter
+			attempt.InsertPosition = pos
+			attempt.Success = true
+			attempt.Message = fmt.Sprintf("found context match after position %d", pos)
+			logger.Debug("recovered placeholder using context after",
+				logger.String("placeholder", placeholder),
+				logger.Int("position", pos))
+			return recovered, attempt
+		}
+	}
+
+	// Strategy 5: Fallback - append at the end
+	recovered := content + " " + placeholder
+	attempt.Strategy = RecoveryStrategyAppend
+	attempt.InsertPosition = -1
+	attempt.Success = true
+	attempt.Message = "appended at end as fallback"
+	logger.Warn("recovered placeholder by appending (all strategies failed)",
+		logger.String("placeholder", placeholder))
+	
+	return recovered, attempt
+}
+
+// tryPatternMatchRecovery attempts to recover by finding similar LaTeX patterns
+func tryPatternMatchRecovery(content string, placeholder string, original string) (string, int, bool) {
+	// Extract the LaTeX command type from the original content
+	cmdPattern := regexp.MustCompile(`^\\([a-zA-Z]+)`)
+	matches := cmdPattern.FindStringSubmatch(original)
+	
+	if len(matches) < 2 {
+		return "", 0, false
+	}
+	
+	cmdName := matches[1]
+	
+	// Look for similar commands in the content and find a good insertion point
+	// Find all occurrences of similar commands
+	similarPattern := regexp.MustCompile(`\\` + regexp.QuoteMeta(cmdName) + `\b`)
+	locs := similarPattern.FindAllStringIndex(content, -1)
+	
+	if len(locs) == 0 {
+		return "", 0, false
+	}
+	
+	// Insert after the last similar command (heuristic: related content is nearby)
+	lastLoc := locs[len(locs)-1]
+	insertPos := lastLoc[1]
+	
+	// Find the end of the current command (after closing brace if present)
+	braceCount := 0
+	for i := insertPos; i < len(content); i++ {
+		if content[i] == '{' {
+			braceCount++
+		} else if content[i] == '}' {
+			braceCount--
+			if braceCount == 0 {
+				insertPos = i + 1
+				break
+			}
+		} else if braceCount == 0 && (content[i] == ' ' || content[i] == '\n') {
+			insertPos = i
+			break
+		}
+	}
+	
+	// Insert the placeholder
+	result := content[:insertPos] + " " + placeholder + content[insertPos:]
+	return result, insertPos, true
+}
+
+// tryLineBasedRecovery attempts to recover by analyzing line structure
+func tryLineBasedRecovery(content string, originalContent string, placeholder string, original string) (string, int, bool) {
+	if originalContent == "" {
+		return "", 0, false
+	}
+	
+	// Find the line number where the original content appears
+	originalLines := strings.Split(originalContent, "\n")
+	contentLines := strings.Split(content, "\n")
+	
+	targetLineNum := -1
+	for i, line := range originalLines {
+		if strings.Contains(line, original) {
+			targetLineNum = i
+			break
+		}
+	}
+	
+	if targetLineNum == -1 {
+		return "", 0, false
+	}
+	
+	// If the translated content has the same or similar number of lines,
+	// try to insert at the corresponding line
+	if len(contentLines) > 0 && targetLineNum < len(contentLines) {
+		// Calculate the position in the content string
+		pos := 0
+		for i := 0; i < targetLineNum && i < len(contentLines); i++ {
+			pos += len(contentLines[i]) + 1 // +1 for newline
+		}
+		
+		// Find a good insertion point within the line
+		lineEnd := pos + len(contentLines[targetLineNum])
+		if lineEnd > len(content) {
+			lineEnd = len(content)
+		}
+		
+		// Insert at the end of the corresponding line
+		result := content[:lineEnd] + " " + placeholder + content[lineEnd:]
+		return result, lineEnd, true
+	}
+	
+	return "", 0, false
+}
+
+// tryContextBeforeRecovery attempts to recover using context before the placeholder
+func tryContextBeforeRecovery(content string, originalContent string, placeholder string, original string) (string, int, bool) {
+	// Find the position of the original content in the original document
+	originalPos := strings.Index(originalContent, original)
+	if originalPos == -1 {
+		return "", 0, false
+	}
+	
+	// Get context before (up to 30 characters, but stop at newlines for better matching)
+	contextStart := originalPos - 30
+	if contextStart < 0 {
+		contextStart = 0
+	}
+	
+	contextBefore := originalContent[contextStart:originalPos]
+	
+	// Trim to last newline for cleaner matching
+	if lastNewline := strings.LastIndex(contextBefore, "\n"); lastNewline != -1 {
+		contextBefore = contextBefore[lastNewline+1:]
+	}
+	
+	// Skip if context is too short
+	if len(contextBefore) < 5 {
+		return "", 0, false
+	}
+	
+	// Find this context in the translated content
+	contextPos := strings.Index(content, contextBefore)
+	if contextPos == -1 {
+		// Try with trimmed whitespace
+		trimmedContext := strings.TrimSpace(contextBefore)
+		if len(trimmedContext) >= 5 {
+			contextPos = strings.Index(content, trimmedContext)
+		}
+	}
+	
+	if contextPos == -1 {
+		return "", 0, false
+	}
+	
+	// Insert after the context
+	insertPos := contextPos + len(contextBefore)
+	result := content[:insertPos] + placeholder + content[insertPos:]
+	return result, insertPos, true
+}
+
+// tryContextAfterRecovery attempts to recover using context after the placeholder
+func tryContextAfterRecovery(content string, originalContent string, placeholder string, original string) (string, int, bool) {
+	// Find the position of the original content in the original document
+	originalPos := strings.Index(originalContent, original)
+	if originalPos == -1 {
+		return "", 0, false
+	}
+	
+	// Get context after (up to 30 characters, but stop at newlines for better matching)
+	afterStart := originalPos + len(original)
+	contextEnd := afterStart + 30
+	if contextEnd > len(originalContent) {
+		contextEnd = len(originalContent)
+	}
+	
+	contextAfter := originalContent[afterStart:contextEnd]
+	
+	// Trim to first newline for cleaner matching
+	if firstNewline := strings.Index(contextAfter, "\n"); firstNewline != -1 {
+		contextAfter = contextAfter[:firstNewline]
+	}
+	
+	// Skip if context is too short
+	if len(contextAfter) < 5 {
+		return "", 0, false
+	}
+	
+	// Find this context in the translated content
+	contextPos := strings.Index(content, contextAfter)
+	if contextPos == -1 {
+		// Try with trimmed whitespace
+		trimmedContext := strings.TrimSpace(contextAfter)
+		if len(trimmedContext) >= 5 {
+			contextPos = strings.Index(content, trimmedContext)
+		}
+	}
+	
+	if contextPos == -1 {
+		return "", 0, false
+	}
+	
+	// Insert before the context
+	insertPos := contextPos
+	result := content[:insertPos] + placeholder + content[insertPos:]
+	return result, insertPos, true
 }
 
 // buildSystemPrompt creates the system prompt for the translation task.
@@ -2064,22 +2485,56 @@ func truncateString(s string, maxLen int) string {
 // It returns the modified content and a map of placeholders to original commands.
 //
 // The placeholders are in the format: <<<LATEX_CMD_N>>> where N is a unique number.
+// Math environments use the format: <<<LATEX_MATH_N>>> for better identification.
 // This format is chosen to be unlikely to appear in normal text and to be preserved
 // by translation APIs.
 //
-// Validates: Requirements 3.2
+// This function now provides comprehensive math environment protection including:
+// - Inline math: $...$ and \(...\)
+// - Display math: $$...$$ and \[...\]
+// - Math environments: equation, align, gather, multline, eqnarray, etc.
+//
+// Validates: Requirements 1.3, 3.2
 func ProtectLaTeXCommands(content string) (string, map[string]string) {
-	commands := ExtractLaTeXCommands(content)
 	placeholders := make(map[string]string)
+	
+	// Step 1: Protect math environments first with dedicated math placeholders
+	// This ensures complete math expressions are protected as single units
+	protectedContent, mathPlaceholders := ProtectMathEnvironments(content)
+	
+	// Merge math placeholders into the main placeholders map
+	for k, v := range mathPlaceholders {
+		placeholders[k] = v
+	}
+	
+	// Step 2: Extract and protect other LaTeX commands from the math-protected content
+	commands := ExtractLaTeXCommands(protectedContent)
 
 	if len(commands) == 0 {
-		return content, placeholders
+		return protectedContent, placeholders
+	}
+
+	// Filter out commands that overlap with math placeholders
+	// (since math is already protected)
+	var filteredCommands []LaTeXCommand
+	for _, cmd := range commands {
+		// Skip if this command is inside a math placeholder
+		isInsideMathPlaceholder := false
+		for placeholder := range mathPlaceholders {
+			if strings.Contains(cmd.Command, placeholder) {
+				isInsideMathPlaceholder = true
+				break
+			}
+		}
+		if !isInsideMathPlaceholder {
+			filteredCommands = append(filteredCommands, cmd)
+		}
 	}
 
 	// Process commands in reverse order to maintain correct positions
-	result := content
-	for i := len(commands) - 1; i >= 0; i-- {
-		cmd := commands[i]
+	result := protectedContent
+	for i := len(filteredCommands) - 1; i >= 0; i-- {
+		cmd := filteredCommands[i]
 		placeholder := fmt.Sprintf("<<<LATEX_CMD_%d>>>", i)
 		placeholders[placeholder] = cmd.Command
 
@@ -2484,6 +2939,15 @@ func ApplyReferenceBasedFixes(translated, original string) string {
 	if bibFixed {
 		anyFixed = true
 		logger.Debug("reference-based fix: fixed wrongly uncommented \\bibliography in preamble")
+	}
+
+	// 1.8. Fix wrongly uncommented lines in preamble
+	// If original has commented lines in preamble, ensure translated also has them commented
+	// This fixes cases where LLM removes % from comment lines, causing "Missing \begin{document}" errors
+	result, preambleFixed := fixWronglyUncommentedPreambleLines(result, original)
+	if preambleFixed {
+		anyFixed = true
+		logger.Debug("reference-based fix: fixed wrongly uncommented preamble lines")
 	}
 
 	// Count commented tables after fix for debugging
@@ -3279,7 +3743,359 @@ func fixWronglyUncommentedBibliography(translated, original string) (string, boo
 	return result, fixed
 }
 
-// fixDuplicateEndDocument removes duplicate or misplaced \end{document} tags.
+// fixWronglyUncommentedPreambleLines fixes cases where LLM translation incorrectly removed
+// comment markers from lines in the preamble that should remain commented.
+// This is critical because uncommented text in the preamble causes "Missing \begin{document}" errors.
+// 
+// Key issue: LLM sometimes splits "% comment text" into two lines:
+//   Line N:   %
+//   Line N+1: comment text (without %)
+// This function detects and fixes such cases.
+//
+// Additional issue: When \usepackage{ctex} is inserted after \documentclass, it causes
+// line number offset between original and translated files. This function also handles
+// lines that were incorrectly uncommented due to this offset.
+func fixWronglyUncommentedPreambleLines(translated, original string) (string, bool) {
+	if original == "" {
+		return translated, false
+	}
+
+	// Find \begin{document} in both original and translated
+	origBeginDocIdx := strings.Index(original, `\begin{document}`)
+	transBeginDocIdx := strings.Index(translated, `\begin{document}`)
+
+	logger.Info("fixWronglyUncommentedPreambleLines: checking preamble",
+		logger.Int("origBeginDocIdx", origBeginDocIdx),
+		logger.Int("transBeginDocIdx", transBeginDocIdx))
+
+	if origBeginDocIdx == -1 || transBeginDocIdx == -1 {
+		return translated, false
+	}
+
+	origPreamble := original[:origBeginDocIdx]
+	transPreamble := translated[:transBeginDocIdx]
+	transBody := translated[transBeginDocIdx:]
+
+	origLines := strings.Split(origPreamble, "\n")
+	transLines := strings.Split(transPreamble, "\n")
+	
+	// Detect line offset caused by \usepackage{ctex} insertion
+	// If translated has \usepackage{ctex} after \documentclass but original doesn't,
+	// there's a 1-line offset
+	lineOffset := 0
+	hasCtexInTrans := false
+	hasCtexInOrig := strings.Contains(origPreamble, `\usepackage{ctex}`)
+	
+	for i, line := range transLines {
+		if strings.Contains(line, `\usepackage{ctex}`) {
+			hasCtexInTrans = true
+			// Check if original has ctex at similar position
+			if !hasCtexInOrig {
+				lineOffset = 1
+				logger.Info("fixWronglyUncommentedPreambleLines: detected ctex insertion offset",
+					logger.Int("ctexLine", i),
+					logger.Int("lineOffset", lineOffset))
+			}
+			break
+		}
+	}
+
+	fixed := false
+
+	// Build a map of commented lines in original (normalized)
+	// Key: line content without leading % and whitespace, normalized to remove extra spaces
+	origCommentedLines := make(map[string]bool)
+	for _, line := range origLines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "%") {
+			// Remove % and leading whitespace
+			content := strings.TrimSpace(strings.TrimPrefix(trimmed, "%"))
+			// Skip empty comments and lines that are just %
+			if content != "" && !strings.HasPrefix(content, "%") {
+				// Normalize: collapse multiple spaces into one
+				normalized := strings.Join(strings.Fields(content), " ")
+				origCommentedLines[normalized] = true
+			}
+		}
+	}
+
+	logger.Info("fixWronglyUncommentedPreambleLines: found commented lines in original",
+		logger.Int("count", len(origCommentedLines)))
+
+	// Debug: log the first 10 lines of the translated preamble
+	for i := 0; i < minInt(10, len(transLines)); i++ {
+		trimmed := strings.TrimSpace(transLines[i])
+		logger.Info("fixWronglyUncommentedPreambleLines: preamble line",
+			logger.Int("lineNum", i),
+			logger.String("trimmed", trimmed[:minInt(50, len(trimmed))]),
+			logger.Int("trimmedLen", len(trimmed)),
+			logger.Bool("isJustPercent", trimmed == "%" || trimmed == "% "))
+	}
+
+	// FIRST PASS: Fix split comment lines where % is on its own line
+	// Pattern: Line N is just "%" or "% ", Line N+1 is uncommented text that should be commented
+	for i := 0; i < len(transLines)-1; i++ {
+		trimmed := strings.TrimSpace(transLines[i])
+		
+		// Debug: log lines that are just %
+		if trimmed == "%" || trimmed == "% " {
+			nextLine := transLines[i+1]
+			nextTrimmed := strings.TrimSpace(nextLine)
+			logger.Info("fixWronglyUncommentedPreambleLines: found isolated % line",
+				logger.Int("lineNum", i),
+				logger.String("nextTrimmed", nextTrimmed[:minInt(60, len(nextTrimmed))]),
+				logger.Bool("nextIsEmpty", nextTrimmed == ""),
+				logger.Bool("nextStartsWithPercent", strings.HasPrefix(nextTrimmed, "%")),
+				logger.Bool("nextStartsWithBackslash", strings.HasPrefix(nextTrimmed, "\\")))
+		}
+		
+		// Check if this line is just "%" or "% " (isolated percent sign)
+		if trimmed == "%" || trimmed == "% " {
+			// Check the next line
+			nextLine := transLines[i+1]
+			nextTrimmed := strings.TrimSpace(nextLine)
+			
+			// Skip if next line is empty, already commented, or is a LaTeX command
+			if nextTrimmed == "" || strings.HasPrefix(nextTrimmed, "%") || strings.HasPrefix(nextTrimmed, "\\") {
+				continue
+			}
+			
+			// Normalize for comparison
+			nextNormalized := strings.Join(strings.Fields(nextTrimmed), " ")
+			
+			// Check if next line matches an original commented line
+			shouldComment := false
+			if origCommentedLines[nextNormalized] {
+				shouldComment = true
+				logger.Info("fixWronglyUncommentedPreambleLines: found split comment (exact match)",
+					logger.Int("lineNum", i+1),
+					logger.String("nextLine", nextTrimmed[:minInt(60, len(nextTrimmed))]))
+			} else {
+				// Check partial match
+				for origLine := range origCommentedLines {
+					if len(nextNormalized) > 10 && strings.Contains(origLine, nextNormalized) {
+						shouldComment = true
+						logger.Info("fixWronglyUncommentedPreambleLines: found split comment (partial match)",
+							logger.Int("lineNum", i+1),
+							logger.String("nextLine", nextTrimmed[:minInt(60, len(nextTrimmed))]),
+							logger.String("origLine", origLine[:minInt(60, len(origLine))]))
+						break
+					}
+				}
+			}
+			
+			// Also check for common comment indicators
+			if !shouldComment {
+				lowerNext := strings.ToLower(nextTrimmed)
+				splitCommentIndicators := []string{
+					"recommended", "optional", "packages", "figures", "typesetting",
+					"hyperref", "hyperlinks", "resulting", "build breaks",
+					"comment out", "following", "attempt", "algorithmic",
+					"initial blind", "submitted", "review", "preprint",
+					"accepted", "camera-ready", "submission", "for preprint",
+					"above.", "better", "work together", "for the",
+					"use the", "instead use", "if accepted",
+				}
+				for _, indicator := range splitCommentIndicators {
+					if strings.Contains(lowerNext, indicator) {
+						shouldComment = true
+						logger.Info("fixWronglyUncommentedPreambleLines: found split comment (indicator match)",
+							logger.Int("lineNum", i+1),
+							logger.String("nextLine", nextTrimmed[:minInt(60, len(nextTrimmed))]),
+							logger.String("indicator", indicator))
+						break
+					}
+				}
+			}
+			
+			if shouldComment {
+				// Comment the next line
+				leadingWhitespace := nextLine[:len(nextLine)-len(strings.TrimLeft(nextLine, " \t"))]
+				transLines[i+1] = leadingWhitespace + "% " + nextTrimmed
+				fixed = true
+			}
+		}
+	}
+
+	// SECOND PASS: Check each line in translated preamble for other uncommented lines
+	for i, line := range transLines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Skip empty lines, lines that are already comments, and lines starting with \
+		if trimmed == "" || strings.HasPrefix(trimmed, "%") || strings.HasPrefix(trimmed, "\\") {
+			continue
+		}
+
+		// Normalize the line for comparison
+		normalized := strings.Join(strings.Fields(trimmed), " ")
+
+		// Check if this line (or a similar line) was commented in original
+		if origCommentedLines[normalized] {
+			// This line was commented in original but is not commented in translated
+			// Add % at the beginning
+			leadingWhitespace := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			transLines[i] = leadingWhitespace + "% " + trimmed
+			fixed = true
+			logger.Info("fixWronglyUncommentedPreambleLines: commenting line (exact match)",
+				logger.String("line", trimmed))
+		} else {
+			// Check for partial matches - the translated line might be a substring of an original commented line
+			// This handles cases where lines are wrapped differently
+			partialMatch := false
+			for origLine := range origCommentedLines {
+				if len(normalized) > 15 && strings.Contains(origLine, normalized) {
+					leadingWhitespace := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+					transLines[i] = leadingWhitespace + "% " + trimmed
+					fixed = true
+					partialMatch = true
+					logger.Info("fixWronglyUncommentedPreambleLines: commenting line (partial match)",
+						logger.String("line", trimmed),
+						logger.String("origLine", origLine[:minInt(60, len(origLine))]))
+					break
+				}
+			}
+			
+			if !partialMatch {
+				// Also check if this looks like a comment that lost its % marker
+				// Common patterns: lines that are English text (not LaTeX commands)
+				// Check if this line contains words that suggest it's a comment
+				lowerLine := strings.ToLower(trimmed)
+				commentIndicators := []string{
+					"recommended", "optional", "packages", "figures", "typesetting",
+					"hyperref", "hyperlinks", "resulting", "build breaks",
+					"comment out", "following", "attempt", "algorithmic",
+					"initial blind", "submitted", "review", "preprint",
+					"accepted", "camera-ready", "submission", "setting:",
+					"above.", "better", "work together", "for the",
+					"use the", "instead use", "if accepted", "for preprint",
+				}
+				
+				// Check for comment indicators
+				for _, indicator := range commentIndicators {
+					if strings.Contains(lowerLine, indicator) {
+						// Additional check: if line contains LaTeX commands, make sure it's really a comment
+						// by checking if it has explanatory text patterns
+						if strings.ContainsAny(trimmed, "{}$\\") {
+							// Line has LaTeX commands - only comment if it has clear comment patterns
+							if strings.Contains(lowerLine, "with") || 
+							   strings.Contains(lowerLine, "above") ||
+							   strings.Contains(lowerLine, "instead") ||
+							   strings.Contains(lowerLine, "for the") ||
+							   strings.Contains(lowerLine, "use the") {
+								leadingWhitespace := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+								transLines[i] = leadingWhitespace + "% " + trimmed
+								fixed = true
+								logger.Info("fixWronglyUncommentedPreambleLines: commenting suspected comment line (with LaTeX)",
+									logger.String("line", trimmed),
+									logger.String("indicator", indicator))
+								break
+							}
+						} else if len(trimmed) > 10 {
+							// No LaTeX commands - safe to comment
+							leadingWhitespace := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+							transLines[i] = leadingWhitespace + "% " + trimmed
+							fixed = true
+							logger.Info("fixWronglyUncommentedPreambleLines: commenting suspected comment line",
+								logger.String("line", trimmed),
+								logger.String("indicator", indicator))
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// THIRD PASS: Handle line offset caused by \usepackage{ctex} insertion
+	// When ctex is inserted after \documentclass, it shifts all subsequent lines by 1
+	// This can cause FixByLineComparison to incorrectly uncomment lines
+	// We need to check if any line in translated that should be commented (based on original)
+	// was incorrectly left uncommented due to line offset
+	if lineOffset > 0 && hasCtexInTrans && !hasCtexInOrig {
+		logger.Info("fixWronglyUncommentedPreambleLines: applying line offset correction",
+			logger.Int("lineOffset", lineOffset))
+		
+		// For each line in translated preamble (after ctex line), check if the corresponding
+		// line in original (offset by -1) was commented
+		for i := 0; i < len(transLines); i++ {
+			transLine := transLines[i]
+			transTrimmed := strings.TrimSpace(transLine)
+			
+			// Skip if already commented, empty, or is the ctex line itself
+			if strings.HasPrefix(transTrimmed, "%") || transTrimmed == "" {
+				continue
+			}
+			if strings.Contains(transLine, `\usepackage{ctex}`) {
+				continue
+			}
+			
+			// Calculate the corresponding line in original (accounting for offset)
+			origIdx := i - lineOffset
+			if origIdx < 0 || origIdx >= len(origLines) {
+				continue
+			}
+			
+			origLine := origLines[origIdx]
+			origTrimmed := strings.TrimSpace(origLine)
+			
+			// Check if original line was commented
+			if strings.HasPrefix(origTrimmed, "%") {
+				// Original was commented - check if content matches
+				origContent := strings.TrimSpace(strings.TrimPrefix(origTrimmed, "%"))
+				origContent = strings.TrimSpace(strings.TrimPrefix(origContent, " "))
+				
+				// Normalize both for comparison
+				origNormalized := strings.Join(strings.Fields(origContent), " ")
+				transNormalized := strings.Join(strings.Fields(transTrimmed), " ")
+				
+				// Check if they're similar (same LaTeX command or similar content)
+				shouldComment := false
+				
+				// Check for exact match
+				if origNormalized == transNormalized {
+					shouldComment = true
+				} else {
+					// Check if they start with the same LaTeX command
+					cmdPattern := regexp.MustCompile(`^\\[a-zA-Z]+`)
+					origCmd := cmdPattern.FindString(origNormalized)
+					transCmd := cmdPattern.FindString(transNormalized)
+					
+					if origCmd != "" && origCmd == transCmd {
+						// Same command - check if arguments are similar
+						// This handles cases like:
+						// Original: % \usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above.
+						// Translated: \usepackage{icml2026} with \usepackage[nohyperref]{icml2026} above.
+						if strings.Contains(origNormalized, "with") && strings.Contains(transNormalized, "with") {
+							shouldComment = true
+						} else if strings.Contains(origNormalized, "above") && strings.Contains(transNormalized, "above") {
+							shouldComment = true
+						} else if strings.HasPrefix(origNormalized, transNormalized[:minInt(30, len(transNormalized))]) {
+							shouldComment = true
+						}
+					}
+				}
+				
+				if shouldComment {
+					leadingWhitespace := transLine[:len(transLine)-len(strings.TrimLeft(transLine, " \t"))]
+					transLines[i] = leadingWhitespace + "% " + transTrimmed
+					fixed = true
+					logger.Info("fixWronglyUncommentedPreambleLines: commenting line due to offset correction",
+						logger.Int("transLineNum", i),
+						logger.Int("origLineNum", origIdx),
+						logger.String("transLine", transTrimmed[:minInt(60, len(transTrimmed))]),
+						logger.String("origLine", origTrimmed[:minInt(60, len(origTrimmed))]))
+				}
+			}
+		}
+	}
+
+	if fixed {
+		transPreamble = strings.Join(transLines, "\n")
+		return transPreamble + transBody, true
+	}
+
+	return translated, false
+}
 // There should only be ONE \end{document} at the very end of the file.
 func fixDuplicateEndDocument(translated, original string) (string, bool) {
 	endDocPattern := regexp.MustCompile(`\\end\{document\}`)
@@ -3386,4 +4202,440 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ============================================================
+// PlaceholderSystem - 占位符系统
+// ============================================================
+
+// PlaceholderConfig 占位符配置
+// Validates: Requirements 1.2
+type PlaceholderConfig struct {
+	Prefix    string // 占位符前缀，默认 "<<<LATEX_"
+	Suffix    string // 占位符后缀，默认 ">>>"
+	Separator string // 类型和编号分隔符，默认 "_"
+}
+
+// DefaultPlaceholderConfig 返回默认占位符配置
+func DefaultPlaceholderConfig() *PlaceholderConfig {
+	return &PlaceholderConfig{
+		Prefix:    "<<<LATEX_",
+		Suffix:    ">>>",
+		Separator: "_",
+	}
+}
+
+// PlaceholderSystem 占位符系统，管理占位符的生成、存储和恢复
+// Validates: Requirements 1.2, 1.5
+type PlaceholderSystem struct {
+	config       *PlaceholderConfig
+	placeholders map[string]string // placeholder -> original content
+	counters     map[StructureType]int // 每种类型的计数器
+	mu           sync.RWMutex
+}
+
+// NewPlaceholderSystem 创建新的占位符系统
+func NewPlaceholderSystem() *PlaceholderSystem {
+	return NewPlaceholderSystemWithConfig(DefaultPlaceholderConfig())
+}
+
+// NewPlaceholderSystemWithConfig 使用自定义配置创建占位符系统
+func NewPlaceholderSystemWithConfig(config *PlaceholderConfig) *PlaceholderSystem {
+	if config == nil {
+		config = DefaultPlaceholderConfig()
+	}
+	return &PlaceholderSystem{
+		config:       config,
+		placeholders: make(map[string]string),
+		counters:     make(map[StructureType]int),
+	}
+}
+
+// GeneratePlaceholder 生成唯一占位符
+// 根据结构类型生成格式为 <<<LATEX_TYPE_N>>> 的占位符
+// Validates: Requirements 1.2
+func (ps *PlaceholderSystem) GeneratePlaceholder(structureType StructureType) string {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	// 获取当前计数并递增
+	count := ps.counters[structureType]
+	ps.counters[structureType] = count + 1
+
+	// 根据类型生成占位符名称
+	typeName := ps.getTypeName(structureType)
+	
+	// 生成占位符: <<<LATEX_TYPE_N>>>
+	placeholder := fmt.Sprintf("%s%s%s%d%s",
+		ps.config.Prefix,
+		typeName,
+		ps.config.Separator,
+		count,
+		ps.config.Suffix)
+
+	return placeholder
+}
+
+// getTypeName 获取结构类型的名称
+func (ps *PlaceholderSystem) getTypeName(structureType StructureType) string {
+	switch structureType {
+	case StructureCommand:
+		return "CMD"
+	case StructureEnvironment:
+		return "ENV"
+	case StructureMathInline:
+		return "MATH"
+	case StructureMathDisplay:
+		return "MATH"
+	case StructureTable:
+		return "TABLE"
+	case StructureComment:
+		return "COMMENT"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// StorePlaceholder 存储占位符映射
+// Validates: Requirements 1.2
+func (ps *PlaceholderSystem) StorePlaceholder(placeholder string, original string) {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.placeholders[placeholder] = original
+	logger.Debug("stored placeholder",
+		logger.String("placeholder", placeholder),
+		logger.Int("originalLength", len(original)))
+}
+
+// RestorePlaceholder 恢复单个占位符
+// 将内容中的指定占位符替换为原始内容
+// Validates: Requirements 1.2
+func (ps *PlaceholderSystem) RestorePlaceholder(content string, placeholder string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	original, exists := ps.placeholders[placeholder]
+	if !exists {
+		logger.Warn("placeholder not found for restoration",
+			logger.String("placeholder", placeholder))
+		return content
+	}
+
+	return strings.ReplaceAll(content, placeholder, original)
+}
+
+// RestoreAll 恢复所有占位符
+// 将内容中的所有占位符替换为原始内容
+// Validates: Requirements 1.2
+func (ps *PlaceholderSystem) RestoreAll(content string) string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	result := content
+	for placeholder, original := range ps.placeholders {
+		result = strings.ReplaceAll(result, placeholder, original)
+	}
+
+	logger.Debug("restored all placeholders",
+		logger.Int("placeholderCount", len(ps.placeholders)),
+		logger.Int("originalLength", len(content)),
+		logger.Int("restoredLength", len(result)))
+
+	return result
+}
+
+// ValidatePlaceholders 验证所有占位符是否存在于内容中
+// 返回丢失的占位符列表
+// Validates: Requirements 1.5
+func (ps *PlaceholderSystem) ValidatePlaceholders(content string) []string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	var missing []string
+	for placeholder := range ps.placeholders {
+		if !strings.Contains(content, placeholder) {
+			missing = append(missing, placeholder)
+		}
+	}
+
+	if len(missing) > 0 {
+		logger.Warn("missing placeholders detected",
+			logger.Int("missingCount", len(missing)),
+			logger.String("missing", strings.Join(missing, ", ")))
+	}
+
+	return missing
+}
+
+// GetPlaceholders 获取所有占位符映射的副本
+func (ps *PlaceholderSystem) GetPlaceholders() map[string]string {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	result := make(map[string]string, len(ps.placeholders))
+	for k, v := range ps.placeholders {
+		result[k] = v
+	}
+	return result
+}
+
+// GetPlaceholderCount 获取占位符数量
+func (ps *PlaceholderSystem) GetPlaceholderCount() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	return len(ps.placeholders)
+}
+
+// Clear 清空所有占位符和计数器
+func (ps *PlaceholderSystem) Clear() {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	ps.placeholders = make(map[string]string)
+	ps.counters = make(map[StructureType]int)
+}
+
+// ProtectContent 保护内容中的LaTeX结构
+// 识别并替换所有LaTeX结构为占位符
+// 返回受保护的内容
+// Validates: Requirements 1.2
+func (ps *PlaceholderSystem) ProtectContent(content string) string {
+	// 识别所有结构
+	structures := IdentifyStructures(content)
+	
+	if len(structures) == 0 {
+		return content
+	}
+
+	// 按位置降序排序，以便从后向前替换
+	sort.Slice(structures, func(i, j int) bool {
+		return structures[i].Start > structures[j].Start
+	})
+
+	result := content
+	for _, structure := range structures {
+		// 跳过嵌套结构（它们会被父结构保护）
+		if structure.IsNested {
+			continue
+		}
+
+		// 生成占位符
+		placeholder := ps.GeneratePlaceholder(structure.Type)
+		
+		// 存储映射
+		ps.StorePlaceholder(placeholder, structure.Content)
+		
+		// 替换内容
+		result = result[:structure.Start] + placeholder + result[structure.End:]
+	}
+
+	logger.Debug("protected content with placeholders",
+		logger.Int("structureCount", len(structures)),
+		logger.Int("placeholderCount", ps.GetPlaceholderCount()))
+
+	return result
+}
+
+// RecoverMissingPlaceholders 尝试恢复丢失的占位符
+// 当翻译过程中占位符丢失时，尝试通过多种策略恢复
+// 使用增强的恢复机制，包括模式匹配、行分析等策略
+// Validates: Requirements 1.5
+func (ps *PlaceholderSystem) RecoverMissingPlaceholders(content string, missing []string) string {
+	result, _ := ps.RecoverMissingPlaceholdersWithReport(content, "", missing)
+	return result
+}
+
+// RecoverMissingPlaceholdersWithContext 使用上下文分析恢复丢失的占位符
+// 这是一个更智能的恢复策略，尝试根据原始内容的上下文找到合适的插入位置
+// Validates: Requirements 1.5
+func (ps *PlaceholderSystem) RecoverMissingPlaceholdersWithContext(content string, originalContent string, missing []string) string {
+	result, _ := ps.RecoverMissingPlaceholdersWithReport(content, originalContent, missing)
+	return result
+}
+
+// RecoverMissingPlaceholdersWithReport 恢复丢失的占位符并返回详细报告
+// 这是主要的恢复函数，实现多种恢复策略
+// Validates: Requirements 1.5
+func (ps *PlaceholderSystem) RecoverMissingPlaceholdersWithReport(content string, originalContent string, missing []string) (string, *RecoveryReport) {
+	if len(missing) == 0 {
+		return content, NewRecoveryReport()
+	}
+
+	ps.mu.RLock()
+	placeholdersCopy := make(map[string]string, len(ps.placeholders))
+	for k, v := range ps.placeholders {
+		placeholdersCopy[k] = v
+	}
+	ps.mu.RUnlock()
+
+	// 使用增强的恢复函数
+	return recoverMissingPlaceholdersWithReport(content, originalContent, placeholdersCopy, missing)
+}
+
+// PlaceholderInfo 占位符信息
+type PlaceholderInfo struct {
+	Placeholder string        // 占位符字符串
+	Original    string        // 原始内容
+	Type        StructureType // 结构类型
+	Index       int           // 索引编号
+}
+
+// GetPlaceholderInfo 获取占位符的详细信息
+func (ps *PlaceholderSystem) GetPlaceholderInfo(placeholder string) (*PlaceholderInfo, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	original, exists := ps.placeholders[placeholder]
+	if !exists {
+		return nil, false
+	}
+
+	// 解析占位符类型和索引
+	info := &PlaceholderInfo{
+		Placeholder: placeholder,
+		Original:    original,
+	}
+
+	// 尝试解析不同类型的占位符
+	typePatterns := map[string]StructureType{
+		"<<<LATEX_CMD_%d>>>":     StructureCommand,
+		"<<<LATEX_MATH_%d>>>":    StructureMathInline, // 或 StructureMathDisplay
+		"<<<LATEX_ENV_%d>>>":     StructureEnvironment,
+		"<<<LATEX_TABLE_%d>>>":   StructureTable,
+		"<<<LATEX_COMMENT_%d>>>": StructureComment,
+	}
+
+	for pattern, structType := range typePatterns {
+		var idx int
+		if n, err := fmt.Sscanf(placeholder, pattern, &idx); n == 1 && err == nil {
+			info.Type = structType
+			info.Index = idx
+			break
+		}
+	}
+
+	return info, true
+}
+
+// HasPlaceholder 检查是否存在指定的占位符
+func (ps *PlaceholderSystem) HasPlaceholder(placeholder string) bool {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	_, exists := ps.placeholders[placeholder]
+	return exists
+}
+
+// GetOriginal 获取占位符对应的原始内容
+func (ps *PlaceholderSystem) GetOriginal(placeholder string) (string, bool) {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	original, exists := ps.placeholders[placeholder]
+	return original, exists
+}
+
+// MergePlaceholders 合并另一个占位符系统的占位符
+func (ps *PlaceholderSystem) MergePlaceholders(other *PlaceholderSystem) {
+	if other == nil {
+		return
+	}
+
+	other.mu.RLock()
+	defer other.mu.RUnlock()
+
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+
+	for k, v := range other.placeholders {
+		ps.placeholders[k] = v
+	}
+}
+
+// Clone 创建占位符系统的副本
+func (ps *PlaceholderSystem) Clone() *PlaceholderSystem {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+
+	clone := &PlaceholderSystem{
+		config:       ps.config,
+		placeholders: make(map[string]string, len(ps.placeholders)),
+		counters:     make(map[StructureType]int, len(ps.counters)),
+	}
+
+	for k, v := range ps.placeholders {
+		clone.placeholders[k] = v
+	}
+	for k, v := range ps.counters {
+		clone.counters[k] = v
+	}
+
+	return clone
+}
+
+// commentPlaceholder represents a protected comment environment
+type commentPlaceholder struct {
+	placeholder string
+	original    string
+}
+
+// protectCommentEnvironments finds and replaces \begin{comment}...\end{comment} blocks
+// with placeholders to prevent them from being translated.
+// The comment package in LaTeX treats everything between these tags as comments,
+// so they should not be translated.
+func protectCommentEnvironments(content string) (string, []commentPlaceholder) {
+	var placeholders []commentPlaceholder
+	result := content
+	
+	// Pattern to match \begin{comment}...\end{comment} including nested content
+	beginTag := `\begin{comment}`
+	endTag := `\end{comment}`
+	
+	counter := 0
+	for {
+		beginPos := strings.Index(result, beginTag)
+		if beginPos == -1 {
+			break
+		}
+		
+		// Find matching end tag
+		endPos := strings.Index(result[beginPos:], endTag)
+		if endPos == -1 {
+			// No matching end tag found, skip this begin tag
+			logger.Warn("unmatched \\begin{comment} found", logger.Int("position", beginPos))
+			break
+		}
+		endPos += beginPos + len(endTag)
+		
+		// Extract the complete comment block
+		commentBlock := result[beginPos:endPos]
+		
+		// Create placeholder
+		placeholder := fmt.Sprintf("%%COMMENT_ENV_PLACEHOLDER_%d%%", counter)
+		counter++
+		
+		placeholders = append(placeholders, commentPlaceholder{
+			placeholder: placeholder,
+			original:    commentBlock,
+		})
+		
+		// Replace in result
+		result = result[:beginPos] + placeholder + result[endPos:]
+		
+		logger.Debug("protected comment environment",
+			logger.Int("index", counter-1),
+			logger.Int("length", len(commentBlock)))
+	}
+	
+	return result, placeholders
+}
+
+// restoreCommentEnvironments restores the original comment environments from placeholders
+func restoreCommentEnvironments(content string, placeholders []commentPlaceholder) string {
+	result := content
+	
+	for _, p := range placeholders {
+		result = strings.Replace(result, p.placeholder, p.original, 1)
+	}
+	
+	return result
 }
