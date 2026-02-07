@@ -2494,30 +2494,65 @@ func truncateString(s string, maxLen int) string {
 // - Display math: $$...$$ and \[...\]
 // - Math environments: equation, align, gather, multline, eqnarray, etc.
 //
-// Validates: Requirements 1.3, 3.2
+// Validates: Requirements 1.3, 1.4, 3.2
 func ProtectLaTeXCommands(content string) (string, map[string]string) {
 	placeholders := make(map[string]string)
 	
-	// Step 1: Protect math environments first with dedicated math placeholders
+	// Step 0: Protect author and title blocks first (they contain proper nouns)
+	// Author names should NEVER be translated
+	protectedContent, authorPlaceholders := ProtectAuthorBlock(content)
+	for k, v := range authorPlaceholders {
+		placeholders[k] = v
+	}
+	
+	logger.Debug("protected author blocks",
+		logger.Int("authorPlaceholders", len(authorPlaceholders)))
+	
+	// Step 1: Protect table environments first (highest priority)
+	// Tables contain complex structures that should not be translated
+	// This includes tabular, table, longtable, array, etc.
+	protectedContent, tablePlaceholders := ProtectTableStructures(protectedContent)
+	
+	// Merge table placeholders into the main placeholders map
+	for k, v := range tablePlaceholders {
+		placeholders[k] = v
+	}
+	
+	logger.Debug("protected table structures",
+		logger.Int("tablePlaceholders", len(tablePlaceholders)))
+	
+	// Step 2: Protect math environments with dedicated math placeholders
 	// This ensures complete math expressions are protected as single units
-	protectedContent, mathPlaceholders := ProtectMathEnvironments(content)
+	protectedContent, mathPlaceholders := ProtectMathEnvironments(protectedContent)
 	
 	// Merge math placeholders into the main placeholders map
 	for k, v := range mathPlaceholders {
 		placeholders[k] = v
 	}
 	
-	// Step 2: Extract and protect other LaTeX commands from the math-protected content
+	// Step 3: Extract and protect other LaTeX commands from the protected content
 	commands := ExtractLaTeXCommands(protectedContent)
 
 	if len(commands) == 0 {
 		return protectedContent, placeholders
 	}
 
-	// Filter out commands that overlap with math placeholders
-	// (since math is already protected)
+	// Filter out commands that overlap with table or math placeholders
+	// (since they are already protected)
 	var filteredCommands []LaTeXCommand
 	for _, cmd := range commands {
+		// Skip if this command is inside a table placeholder
+		isInsideTablePlaceholder := false
+		for placeholder := range tablePlaceholders {
+			if strings.Contains(cmd.Command, placeholder) {
+				isInsideTablePlaceholder = true
+				break
+			}
+		}
+		if isInsideTablePlaceholder {
+			continue
+		}
+		
 		// Skip if this command is inside a math placeholder
 		isInsideMathPlaceholder := false
 		for placeholder := range mathPlaceholders {
@@ -2635,12 +2670,19 @@ func GetNonMathText(content string) string {
 // - \end{enumerate}\item -> \end{enumerate}\n\item
 // - Multiple \item on same line
 // - \begin{...} and \end{...} merged with other content
+// - Super long lines where LLM merged multiple paragraphs/tables
 func FixLaTeXLineStructure(content string) string {
 	logger.Info("FixLaTeXLineStructure: starting",
 		logger.Int("contentLength", len(content)),
 		logger.Bool("hasTabular", strings.Contains(content, "\\begin{tabular}")))
 	
 	result := content
+
+	// ============================================================
+	// CRITICAL: Fix super long lines where LLM merged multiple structures
+	// This must run FIRST before other fixes
+	// ============================================================
+	result = fixSuperLongLines(result)
 
 	// Fix \end{itemize} followed by \item on same line
 	// Pattern: \end{itemize}\item or \end{itemize}  \item (with spaces)
@@ -2884,6 +2926,91 @@ func fixIncompleteTabularColumnSpecInTranslator(content string) string {
 	}
 	
 	return result
+}
+
+// fixSuperLongLines breaks up super long lines where LLM merged multiple structures.
+// This is critical because LLM sometimes merges entire sections, tables, and paragraphs
+// into single lines, which breaks LaTeX compilation and causes missing content.
+func fixSuperLongLines(content string) string {
+	lines := strings.Split(content, "\n")
+	var result []string
+	
+	for _, line := range lines {
+		// Only process lines longer than 1000 characters
+		if len(line) < 1000 {
+			result = append(result, line)
+			continue
+		}
+		
+		logger.Info("fixSuperLongLines: processing long line",
+			logger.Int("length", len(line)))
+		
+		// Run multiple passes to handle nested cases
+		fixed := line
+		for pass := 0; pass < 5; pass++ {
+			prevLen := len(fixed)
+			
+			// Add newlines BEFORE these commands (they should start on their own line)
+			beforePatterns := []string{
+				`\\section\{`,
+				`\\subsection\{`,
+				`\\subsubsection\{`,
+				`\\paragraph\{`,
+				`\\begin\{table`,
+				`\\begin\{figure`,
+				`\\begin\{tabular`,
+				`\\begin\{equation`,
+				`\\begin\{align`,
+				`\\begin\{itemize`,
+				`\\begin\{enumerate`,
+				`\\begin\{description`,
+				`\\caption\{`,
+				`\\footnotetext\{`,
+				`\\toprule`,
+				`\\midrule`,
+				`\\bottomrule`,
+				`\\hline`,
+				`\\centering`,
+				`\\resizebox`,
+				`\\label\{`,
+			}
+			
+			for _, pattern := range beforePatterns {
+				re := regexp.MustCompile(`([^\n])(\s*)(` + pattern + `)`)
+				fixed = re.ReplaceAllString(fixed, "$1\n$3")
+			}
+			
+			// Add newlines AFTER these commands (content should continue on next line)
+			afterPatterns := []string{
+				`\\end\{table\*?\}`,
+				`\\end\{figure\*?\}`,
+				`\\end\{tabular\*?\}`,
+				`\\end\{equation\*?\}`,
+				`\\end\{align\*?\}`,
+				`\\end\{itemize\}`,
+				`\\end\{enumerate\}`,
+				`\\end\{description\}`,
+				`\\bottomrule`,
+				`\\\\`, // Table row endings
+			}
+			
+			for _, pattern := range afterPatterns {
+				re := regexp.MustCompile(`(` + pattern + `)(\s*)([^\n])`)
+				fixed = re.ReplaceAllString(fixed, "$1\n$3")
+			}
+			
+			// If no changes were made, stop iterating
+			if len(fixed) == prevLen {
+				break
+			}
+		}
+		
+		// Split the fixed line and add all parts
+		fixedLines := strings.Split(fixed, "\n")
+		result = append(result, fixedLines...)
+	}
+	
+	return strings.Join(result, "\n")
 }
 
 // ApplyReferenceBasedFixes applies fixes by comparing translated content with original.

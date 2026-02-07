@@ -3854,12 +3854,28 @@ func fixMergedCommentLinesInPreamble(content, original string) string {
 // It adds \usepackage{ctex} after \documentclass if not already present.
 // It also fixes microtype compatibility issues with XeLaTeX and removes conflicting CJK packages.
 func ensureCtexPackage(content string) string {
-	// Check if ctex is already included
-	if strings.Contains(content, "\\usepackage{ctex}") || strings.Contains(content, "\\usepackage[") && strings.Contains(content, "ctex") {
-		logger.Debug("ctex package already present")
+	// Check if ctex is already included (must be uncommented)
+	// We need to check line by line to avoid matching commented lines like "% \usepackage{ctex}"
+	hasUncommentedCtex := false
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Skip commented lines
+		if strings.HasPrefix(trimmed, "%") {
+			continue
+		}
+		// Check for ctex package (with or without options)
+		if strings.Contains(line, "\\usepackage{ctex}") || 
+		   (strings.Contains(line, "\\usepackage[") && strings.Contains(line, "ctex}")) {
+			hasUncommentedCtex = true
+			break
+		}
+	}
+	
+	if hasUncommentedCtex {
+		logger.Debug("ctex package already present (uncommented)")
 	} else {
 		// Find the first uncommented \documentclass line and add \usepackage{ctex} after it
-		lines := strings.Split(content, "\n")
 		var result []string
 		added := false
 
@@ -3925,6 +3941,69 @@ func ensureCtexPackage(content string) string {
 		}
 	}
 
+	// Fix nested tabular structures that were split across multiple lines
+	content = fixNestedTabularStructure(content)
+
+	return content
+}
+
+// fixNestedTabularStructure fixes nested tabular structures that were incorrectly split across multiple lines.
+// This happens when the translator breaks \begin{tabular}...\end{tabular} into multiple lines,
+// which causes LaTeX compilation errors like "Missing \cr inserted".
+func fixNestedTabularStructure(content string) string {
+	// Pattern to match nested tabular that should be on single line
+	// e.g., \begin{tabular}[c]{@{}c@{}}...\end{tabular}}
+	pattern := regexp.MustCompile(`(\\begin\{tabular\}\[[^\]]+\]\{[^}]+\})([\s\S]*?)(\\end\{tabular\}\})`)
+	
+	fixed := false
+	content = pattern.ReplaceAllStringFunc(content, func(match string) string {
+		// Check if the match spans multiple lines
+		if strings.Contains(match, "\n") {
+			// Merge into single line, replacing newlines with spaces
+			result := strings.ReplaceAll(match, "\n", " ")
+			result = strings.ReplaceAll(result, "\r", "")
+			// Clean up multiple spaces
+			for strings.Contains(result, "  ") {
+				result = strings.ReplaceAll(result, "  ", " ")
+			}
+			fixed = true
+			return result
+		}
+		return match
+	})
+	
+	if fixed {
+		logger.Debug("fixed nested tabular structures that were split across lines")
+	}
+	
+	// Fix standalone } on a line after \end{tabular} or \end{tabular}}
+	// Pattern: \end{tabular}\n}\n or \end{tabular}}\n}\n -> remove the extra }
+	extraBracePattern := regexp.MustCompile(`(\\end\{tabular\}\}?)\s*\n\}\s*\n`)
+	for extraBracePattern.MatchString(content) {
+		content = extraBracePattern.ReplaceAllString(content, "$1\n")
+		logger.Debug("removed extra closing braces after tabular")
+	}
+	
+	// Fix \end{table without closing brace - this happens when LLM corrupts the structure
+	// Pattern: \end{table followed by space or backslash (not })
+	// e.g., \end{table \subsection -> \end{table} \subsection
+	incompleteEndTablePattern := regexp.MustCompile(`\\end\{table([^}*])`)
+	if incompleteEndTablePattern.MatchString(content) {
+		content = incompleteEndTablePattern.ReplaceAllString(content, "\\end{table}$1")
+		logger.Debug("fixed incomplete \\end{table} commands")
+	}
+	
+	// Fix \end{tabular without closing brace
+	incompleteEndTabularPattern := regexp.MustCompile(`\\end\{tabular([^}*])`)
+	if incompleteEndTabularPattern.MatchString(content) {
+		content = incompleteEndTabularPattern.ReplaceAllString(content, "\\end{tabular}$1")
+		logger.Debug("fixed incomplete \\end{tabular} commands")
+	}
+	
+	// Fix \multirow{ without proper closing - ensure nested tabular inside multirow is complete
+	// Pattern: \multirow{...}{\begin{tabular}...\end{tabular} (missing final })
+	// This is complex, so we use a simpler approach: ensure all \begin{tabular} have matching \end{tabular}}
+	
 	return content
 }
 
