@@ -1,3 +1,59 @@
-build/bin
-node_modules
-frontend/dist
+# Build artifacts
+build/
+*.exe
+*.exe~
+
+# Dependencies
+node_modules/
+frontend/dist/
+
+# Log files
+*.log
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Test data and output (large files, generated)
+testdata/output/
+testdata/batch_arxiv/
+testdata/arxiv_test/
+testdata/deep_book_test/
+testdata/deep_translate_test/
+testdata/deep-representation-learning-book-main_extracted/
+testdata/license_debug_test/
+testdata/*.pdf
+testdata/*.zip
+
+# Temporary/scratch files
+*.tmp
+cli_test_*.txt
+cli_test_*.log
+test_preamble.txt
+arxiv_*.txt
+latex-translator-config.json
+
+# Script files (temporary automation)
+auto_continue.ps1
+monitor_batch.ps1
+monitor_batch.cmd
+run_all_phases.ps1
+translate_deep_book.ps1
+translate_deep_book.cmd
+check_progress.cmd
+compile_with_lualatex.cmd
+
+# Generated summary files (not real docs)
+ALL_FIXES_INTEGRATED.md
+INTEGRATION_COMPLETE.md
+LICENSE_INTEGRATION.md
+ROTATION_FIX_COMPLETE.md
+修复完成.md
