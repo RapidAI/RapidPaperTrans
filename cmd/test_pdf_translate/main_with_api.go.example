@@ -1,0 +1,65 @@
+// Example: Test PDF translation with real API
+// Copy this file to main.go and fill in your API key to test real translation
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"latex-translator/internal/pdf"
+	"latex-translator/internal/types"
+)
+
+func main() {
+	// Configuration - fill in your API details
+	config := &types.Config{
+		OpenAIAPIKey:  "your-api-key-here", // Replace with your API key
+		OpenAIBaseURL: "https://api.openai.com/v1", // Or your custom endpoint
+		OpenAIModel:   "gpt-4o-mini",
+		ContextWindow: 4000,
+		Concurrency:   3,
+	}
+
+	// Find test PDF
+	inputPDF := "testdata/single-test.pdf"
+	if _, err := os.Stat(inputPDF); err != nil {
+		fmt.Println("Test PDF not found")
+		os.Exit(1)
+	}
+
+	fmt.Printf("Testing PDF translation with API: %s\n", inputPDF)
+
+	// Create output directory
+	outputDir := "testdata/output"
+	os.MkdirAll(outputDir, 0755)
+	outputPDF := filepath.Join(outputDir, "translated_with_api.pdf")
+
+	// Create BabelDocPDFTranslator
+	translator := pdf.NewBabelDocPDFTranslator(pdf.BabelDocPDFTranslatorConfig{
+		Config:    config,
+		WorkDir:   outputDir,
+		CachePath: filepath.Join(outputDir, "translation_cache.json"),
+	})
+	defer translator.Close()
+
+	// Translate with progress callback
+	result, err := translator.TranslatePDF(inputPDF, outputPDF, func(phase string, progress int) {
+		fmt.Printf("\r[%s] Progress: %d%%", phase, progress)
+	})
+
+	fmt.Println() // New line after progress
+
+	if err != nil {
+		fmt.Printf("Translation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\nTranslation complete!\n")
+	fmt.Printf("  Input: %s\n", result.InputPath)
+	fmt.Printf("  Output: %s\n", result.OutputPath)
+	fmt.Printf("  Total blocks: %d\n", result.TotalBlocks)
+	fmt.Printf("  Translated: %d\n", result.TranslatedBlocks)
+	fmt.Printf("  From cache: %d\n", result.CachedBlocks)
+	fmt.Printf("  Formulas (skipped): %d\n", result.FormulaBlocks)
+}

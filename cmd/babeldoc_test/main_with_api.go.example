@@ -1,0 +1,64 @@
+// Example: BabelDOC-style PDF translation with real API
+// Rename to main.go and configure API settings to use
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"latex-translator/internal/pdf"
+	"latex-translator/internal/types"
+)
+
+func main() {
+	inputPath := "testdata/single-test.pdf"
+	outputDir := "testdata/output"
+	outputPath := filepath.Join(outputDir, "single-test_translated_api.pdf")
+
+	// Create output directory
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		fmt.Printf("Error creating output directory: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Configure API settings
+	config := &types.Config{
+		OpenAIAPIKey:  os.Getenv("OPENAI_API_KEY"),
+		OpenAIBaseURL: os.Getenv("OPENAI_BASE_URL"), // e.g., "https://api.openai.com/v1"
+		OpenAIModel:   "gpt-4o-mini",
+		ContextWindow: 4000,
+		Concurrency:   3,
+	}
+
+	if config.OpenAIAPIKey == "" {
+		fmt.Println("Error: OPENAI_API_KEY environment variable not set")
+		os.Exit(1)
+	}
+
+	// Create BabelDOC translator
+	translator := pdf.NewBabelDocPDFTranslator(pdf.BabelDocPDFTranslatorConfig{
+		Config:    config,
+		WorkDir:   outputDir,
+		CachePath: filepath.Join(outputDir, "translation_cache.json"),
+	})
+	defer translator.Close()
+
+	// Translate with progress callback
+	result, err := translator.TranslatePDF(inputPath, outputPath, func(phase string, progress int) {
+		fmt.Printf("[%s] Progress: %d%%\n", phase, progress)
+	})
+
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n=== Translation Complete ===\n")
+	fmt.Printf("Input:  %s\n", result.InputPath)
+	fmt.Printf("Output: %s\n", result.OutputPath)
+	fmt.Printf("Total blocks:      %d\n", result.TotalBlocks)
+	fmt.Printf("Translated blocks: %d\n", result.TranslatedBlocks)
+	fmt.Printf("Cached blocks:     %d\n", result.CachedBlocks)
+	fmt.Printf("Formula blocks:    %d\n", result.FormulaBlocks)
+}
