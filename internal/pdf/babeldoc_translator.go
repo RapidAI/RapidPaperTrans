@@ -3,15 +3,11 @@
 package pdf
 
 import (
-	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
 	"github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -19,7 +15,6 @@ import (
 	pdftypes "github.com/pdfcpu/pdfcpu/pkg/pdfcpu/types"
 
 	"latex-translator/internal/logger"
-	"latex-translator/internal/python"
 )
 
 // BabelDocTranslator implements BabelDOC-style PDF translation in pure Go.
@@ -351,36 +346,67 @@ func (t *BabelDocTranslator) splitIntoParagraphs(content string) []string {
 
 // processRow processes a row of text and creates a BabelDocBlock
 func (t *BabelDocTranslator) processRow(row *pdf.Row, pageNum int, blockID *int) *BabelDocBlock {
-	var textBuilder strings.Builder
 	var minX, maxX, minY, maxY float64
 	var totalFontSize float64
 	var fontName string
 	var isBold, isItalic bool
 	var chars []CharInfo
 	first := true
-	var lastX float64
-	var lastWidth float64
 
+	// First pass: collect all non-empty text fragments
+	var fragments []string
 	for _, text := range row.Content {
 		if text.S == "" {
 			continue
 		}
-
-		// Filter out PostScript/PDF operator code
 		if t.isPostScriptCode(text.S) {
 			continue
 		}
+		fragments = append(fragments, text.S)
+	}
 
-		// Add space between words if there's a gap
-		if !first && text.X > lastX+lastWidth+2 {
-			textBuilder.WriteString(" ")
+	// Second pass: join fragments with smart spacing.
+	// ledongthuc/pdf splits text at font/encoding boundaries (ligatures like fi, fl, ff).
+	// Since we can't reliably distinguish ligature splits from word boundaries
+	// without actual X position data, we add spaces between all fragments.
+	// The LLM translator can handle minor spacing artifacts like "Lar ge" or "v arious".
+	var textBuilder strings.Builder
+	for i, frag := range fragments {
+		if i > 0 && textBuilder.Len() > 0 {
+			prev := fragments[i-1]
+			// Only skip space for clear ligature/encoding patterns:
+			skipSpace := false
+			// 1-char fragment that's a letter (ligature split or small-caps encoding)
+			if len(prev) == 1 && ((prev[0] >= 'a' && prev[0] <= 'z') || (prev[0] >= 'A' && prev[0] <= 'Z')) {
+				skipSpace = true
+			}
+			if len(frag) == 1 && ((frag[0] >= 'a' && frag[0] <= 'z') || (frag[0] >= 'A' && frag[0] <= 'Z')) {
+				skipSpace = true
+			}
+			// Don't add space before punctuation
+			if len(frag) > 0 && (frag[0] == ',' || frag[0] == '.' || frag[0] == ';' || frag[0] == ':' || frag[0] == ')' || frag[0] == ']') {
+				skipSpace = true
+			}
+			// Don't add space after opening bracket
+			if len(prev) > 0 && (prev[len(prev)-1] == '(' || prev[len(prev)-1] == '[') {
+				skipSpace = true
+			}
+			// Don't add space if prev ends with hyphen (line-break or compound word)
+			if len(prev) > 0 && prev[len(prev)-1] == '-' {
+				skipSpace = true
+			}
+			if !skipSpace {
+				textBuilder.WriteString(" ")
+			}
 		}
+		textBuilder.WriteString(frag)
+	}
 
-		textBuilder.WriteString(text.S)
-		
-		// Estimate width of this text segment
-		lastX = text.X
-		lastWidth = float64(len(text.S)) * text.FontSize * 0.5
+	// Track positions from row content
+	for _, text := range row.Content {
+		if text.S == "" || t.isPostScriptCode(text.S) {
+			continue
+		}
 
 		// Track position bounds
 		if first {
@@ -454,6 +480,22 @@ func (t *BabelDocTranslator) processRow(row *pdf.Row, pageNum int, blockID *int)
 	if estimatedWidth < avgFontSize {
 		estimatedWidth = avgFontSize * float64(len(textStr)) * 0.5
 	}
+	// Cap width to reasonable page bounds:
+	// For US Letter (612pt), max text width is ~500pt (with margins)
+	// For A4 (595pt), similar constraint
+	maxTextWidth := 500.0
+	if estimatedWidth > maxTextWidth {
+		estimatedWidth = maxTextWidth
+	}
+	// Also ensure width doesn't extend past right edge of page
+	// (assuming ~72pt right margin on a 612pt page)
+	maxRight := 540.0
+	if minX+estimatedWidth > maxRight {
+		estimatedWidth = maxRight - minX
+		if estimatedWidth < 50 {
+			estimatedWidth = 50
+		}
+	}
 
 	estimatedHeight := avgFontSize * 1.2
 	if estimatedHeight <= 0 {
@@ -498,7 +540,7 @@ func (t *BabelDocTranslator) sortBlocksByReadingOrder(blocks []BabelDocBlock) {
 }
 
 // GenerateTranslatedPDF generates a PDF with translated text overlaid on the original.
-// Priority: 1. Python PyMuPDF (best quality), 2. pdfcpu stamps (fallback)
+// Priority: 1. GoPDF2 overlay (best quality), 2. pdfcpu stamps (fallback)
 func (t *BabelDocTranslator) GenerateTranslatedPDF(originalPath string, blocks []TranslatedBabelDocBlock, outputPath string) error {
 	logger.Info("generating translated PDF (BabelDOC style)",
 		logger.String("input", originalPath),
@@ -527,17 +569,17 @@ func (t *BabelDocTranslator) GenerateTranslatedPDF(originalPath string, blocks [
 		return t.copyFile(originalPath, outputPath)
 	}
 
-	// Method 1: Try Python PyMuPDF overlay (best quality for Chinese)
-	fmt.Println("正在使用 Python + PyMuPDF 方法覆盖文本...")
-	if err := t.generatePythonOverlayPDF(originalPath, blocks, outputPath); err == nil {
+	// Method 1: Try GoPDF2 overlay (pure Go, best quality for Chinese)
+	fmt.Println("正在使用 GoPDF2 方法覆盖文本...")
+	if err := t.generateGoPDF2OverlayPDF(originalPath, blocks, outputPath); err == nil {
 		// Verify output
 		if fileInfo, err := os.Stat(outputPath); err == nil && fileInfo.Size() > 0 {
-			logger.Info("translated PDF generated successfully with Python PyMuPDF",
+			logger.Info("translated PDF generated successfully with GoPDF2",
 				logger.String("output", outputPath))
 			return nil
 		}
 	} else {
-		fmt.Printf("Warning: Python overlay failed: %v\n", err)
+		fmt.Printf("Warning: GoPDF2 overlay failed: %v\n", err)
 	}
 
 	// Method 2: Fallback to pdfcpu stamps
@@ -843,6 +885,84 @@ func (t *BabelDocTranslator) isCaption(text string) bool {
 	return false
 }
 
+// isWordBoundary determines if two adjacent text fragments should have a space between them.
+// ledongthuc/pdf splits text at font/encoding boundaries (e.g., ligatures fi, fl, ff, ffi).
+// Examples of ligature splits: "v"+"arious"="various", "e"+"ven"="even", "Ho"+"we"+"v"+"er"
+// Examples of word boundaries: "language"+"models", "consistently"+"benefit"
+func (t *BabelDocTranslator) isWordBoundary(prev, curr string) bool {
+	if len(prev) == 0 || len(curr) == 0 {
+		return false
+	}
+
+	lastChar := prev[len(prev)-1]
+	firstChar := curr[0]
+
+	// If prev ends with hyphen at end of line, no space (line-break hyphen)
+	if lastChar == '-' {
+		return false
+	}
+
+	// If current starts with punctuation that attaches to previous word, no space
+	if firstChar == ',' || firstChar == '.' || firstChar == ';' || firstChar == ':' ||
+		firstChar == ')' || firstChar == ']' || firstChar == '}' || firstChar == '\'' {
+		return false
+	}
+
+	// If prev ends with opening bracket, no space
+	if lastChar == '(' || lastChar == '[' || lastChar == '{' {
+		return false
+	}
+
+	// Ligature split detection:
+	// PDF fonts commonly split at ligature boundaries, producing 1-char fragments
+	// like "v", "e", "w" that are parts of words like "various", "even", "shadow".
+	// Rule: if EITHER fragment is exactly 1 character and it's a lowercase letter,
+	// it's almost certainly a ligature split.
+	if len(prev) == 1 && lastChar >= 'a' && lastChar <= 'z' {
+		return false
+	}
+	if len(curr) == 1 && firstChar >= 'a' && firstChar <= 'z' {
+		return false
+	}
+
+	// Special case: "Lar"+"ge" type splits where a short fragment (2-3 chars)
+	// continues a word. If prev is short AND ends lowercase AND curr starts lowercase
+	// AND curr is also short, likely a split word.
+	// But "we"+"observe" should be two words. The difference is that "ge" is not
+	// a common English word while "we" is.
+	// Since we can't use a dictionary, use a simpler rule:
+	// If prev is exactly 2 chars, both lowercase, and curr starts lowercase,
+	// check if prev looks like a common 2-letter word.
+	if len(prev) == 2 && lastChar >= 'a' && lastChar <= 'z' && prev[0] >= 'a' && prev[0] <= 'z' {
+		// Common 2-letter words that should NOT be joined to next fragment
+		commonWords := map[string]bool{
+			"an": true, "as": true, "at": true, "be": true, "by": true,
+			"do": true, "go": true, "he": true, "if": true, "in": true,
+			"is": true, "it": true, "me": true, "my": true, "no": true,
+			"of": true, "on": true, "or": true, "so": true, "to": true,
+			"up": true, "us": true, "we": true,
+		}
+		if commonWords[prev] {
+			// It's a real word — add space if next also looks like a word start
+			if firstChar >= 'a' && firstChar <= 'z' && len(curr) >= 2 {
+				return true
+			}
+		} else {
+			// Not a common word — likely a ligature fragment (e.g., "ge", "er", "ar")
+			if firstChar >= 'a' && firstChar <= 'z' {
+				return false
+			}
+		}
+	}
+
+	// If both fragments are 3+ chars, it's a word boundary
+	if len(prev) >= 2 && len(curr) >= 2 {
+		return true
+	}
+
+	return false
+}
+
 // isPostScriptCode checks if text looks like PostScript code
 func (t *BabelDocTranslator) isPostScriptCode(text string) bool {
 	if len(text) == 0 {
@@ -906,119 +1026,41 @@ func (t *BabelDocTranslator) copyFile(src, dst string) error {
 	return err
 }
 
-// generatePythonOverlayPDF generates a PDF with Chinese text overlaid using Python PyMuPDF
-func (t *BabelDocTranslator) generatePythonOverlayPDF(originalPath string, blocks []TranslatedBabelDocBlock, outputPath string) error {
-	// Ensure Python environment is set up with required packages
-	fmt.Println("正在检查 Python 环境...")
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		fmt.Println(msg)
-	}); err != nil {
-		return fmt.Errorf("failed to setup Python environment: %w", err)
-	}
-
-	// Get Python path from our managed environment
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python environment not ready")
-	}
-
-	// Find Python script
-	possiblePaths := []string{
-		filepath.Join("internal", "pdf", "overlay_pdf.py"),
-		filepath.Join("scripts", "pdf_translate.py"),
-	}
-	
-	scriptPath := ""
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			scriptPath = path
-			break
-		}
-	}
-	
-	if scriptPath == "" {
-		return fmt.Errorf("Python overlay script not found")
-	}
-	
-	// Create blocks JSON file
-	blocksFile, err := t.createBlocksJSONFile(blocks)
-	if err != nil {
-		return fmt.Errorf("failed to create blocks JSON file: %v", err)
-	}
-	
-	// Debug: also save to output directory
-	debugFile := filepath.Join(t.workDir, "debug_blocks.json")
-	if data, err := os.ReadFile(blocksFile); err == nil {
-		os.WriteFile(debugFile, data, 0644)
-	}
-	
-	defer os.Remove(blocksFile)
-	
-	// Run Python script using our managed Python environment
-	cmd := exec.Command(pythonPath, scriptPath, originalPath, blocksFile, outputPath)
-	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Python overlay failed: %v\nOutput: %s", err, string(output))
-	}
-	
-	fmt.Printf("Python overlay output: %s\n", string(output))
-	return nil
-}
-
-// createBlocksJSONFile creates a temporary JSON file with block data for Python script
-func (t *BabelDocTranslator) createBlocksJSONFile(blocks []TranslatedBabelDocBlock) (string, error) {
-	type BlockJSON struct {
-		Page           int     `json:"page"`
-		X              float64 `json:"x"`
-		Y              float64 `json:"y"`
-		Width          float64 `json:"width"`
-		Height         float64 `json:"height"`
-		FontSize       float64 `json:"font_size"`
-		BlockType      string  `json:"block_type"`
-		Text           string  `json:"text"`
-		TranslatedText string  `json:"translated_text"`
-	}
-	
-	jsonBlocks := make([]BlockJSON, 0, len(blocks))
-	for _, block := range blocks {
-		// Skip blocks without translation
-		if block.TranslatedText == "" {
+// generateGoPDF2OverlayPDF generates a PDF with Chinese text overlaid using GoPDF2
+func (t *BabelDocTranslator) generateGoPDF2OverlayPDF(originalPath string, blocks []TranslatedBabelDocBlock, outputPath string) error {
+	// Convert TranslatedBabelDocBlock to TranslatedBlock for GoPDF2Generator
+	var translatedBlocks []TranslatedBlock
+	for _, b := range blocks {
+		if b.TranslatedText == "" || b.BlockType == "formula" {
 			continue
 		}
-		// Skip formula blocks - they should not be translated/overlaid
-		if block.BlockType == "formula" {
-			continue
-		}
-		jsonBlocks = append(jsonBlocks, BlockJSON{
-			Page:           block.Page,
-			X:              block.X,
-			Y:              block.Y,
-			Width:          block.Width,
-			Height:         block.Height,
-			FontSize:       block.FontSize,
-			BlockType:      block.BlockType,
-			Text:           block.Text,
-			TranslatedText: block.TranslatedText,
+		translatedBlocks = append(translatedBlocks, TranslatedBlock{
+			TextBlock: TextBlock{
+				ID:        b.ID,
+				Page:      b.Page,
+				Text:      b.Text,
+				X:         b.X,
+				Y:         b.Y,
+				Width:     b.Width,
+				Height:    b.Height,
+				FontSize:  b.FontSize,
+				FontName:  b.FontName,
+				IsBold:    b.IsBold,
+				IsItalic:  b.IsItalic,
+				BlockType: b.BlockType,
+			},
+			TranslatedText: b.TranslatedText,
+			FromCache:      b.FromCache,
 		})
 	}
-	
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "blocks_*.json")
-	if err != nil {
-		return "", err
+
+	gen := NewGoPDF2Generator(t.workDir)
+	if t.fontPath != "" {
+		gen.fontPath = t.fontPath
 	}
-	defer tmpFile.Close()
-	
-	encoder := json.NewEncoder(tmpFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(jsonBlocks); err != nil {
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-	
-	return tmpFile.Name(), nil
+	return gen.GenerateTranslatedPDF(originalPath, translatedBlocks, outputPath)
 }
+
 
 // ConvertToTranslatedBlocks converts BabelDocBlocks to TranslatedBabelDocBlocks
 func ConvertToTranslatedBlocks(blocks []BabelDocBlock, translations map[string]string) []TranslatedBabelDocBlock {
@@ -1047,17 +1089,23 @@ func FilterTranslatableBlocks(blocks []BabelDocBlock) []BabelDocBlock {
 		}
 		
 		// Skip blocks with invalid positions (likely metadata or artifacts)
-		if block.X == 0 && block.Y == 0 && block.Width > 500 {
+		if block.X == 0 && block.Y == 0 {
 			continue
 		}
 		
-		// Skip blocks with negative Y that are too far below page
-		if block.Y < -100 {
+		// Skip blocks with negative Y (below page, e.g., arXiv ID watermarks)
+		if block.Y < 0 {
 			continue
 		}
 		
 		// Skip very short blocks that are likely page numbers or artifacts
 		if len(block.Text) < 3 && block.Width < 20 {
+			continue
+		}
+
+		// Skip blocks that look like page identifiers (e.g., "Preprint", "arXiv:...")
+		textLower := strings.ToLower(strings.TrimSpace(block.Text))
+		if textLower == "preprint" || strings.HasPrefix(textLower, "arxiv:") {
 			continue
 		}
 		
@@ -1146,366 +1194,29 @@ func FormatPageCountError(result *PageCountResult) string {
 		result.TranslatedPages, result.OriginalPages, result.DiffPercent*100)
 }
 
-// PyExtractedBlock represents a text block extracted by Python
-type PyExtractedBlock struct {
-	ID           string  `json:"id"`
-	Page         int     `json:"page"`
-	X            float64 `json:"x"`
-	Y            float64 `json:"y"`
-	Width        float64 `json:"width"`
-	Height       float64 `json:"height"`
-	Text         string  `json:"text"`
-	BlockType    string  `json:"block_type"`
-	Translatable bool    `json:"translatable"`
-	Rotation     int     `json:"rotation,omitempty"`
-	TranslatedText string `json:"translated_text,omitempty"`
-}
-
-// ExtractTextWithPython extracts text blocks from PDF using Python PyMuPDF
-func (t *BabelDocTranslator) ExtractTextWithPython(pdfPath string) ([]PyExtractedBlock, error) {
-	logger.Info("extracting text with Python", logger.String("path", pdfPath))
-
-	// Ensure Python environment
-	if err := python.EnsureGlobalEnv(nil); err != nil {
-		return nil, fmt.Errorf("failed to setup Python: %w", err)
-	}
-
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return nil, fmt.Errorf("Python not ready")
-	}
-
-	// Write embedded script to temp file
-	scriptFile := filepath.Join(t.workDir, "extract_text.py")
-	if err := os.WriteFile(scriptFile, []byte(ExtractTextPyScript), 0644); err != nil {
-		return nil, fmt.Errorf("failed to write script: %w", err)
-	}
-
-	// Create temp file for output
-	outputFile := filepath.Join(t.workDir, "extracted_blocks.json")
-
-	// Run extraction
-	cmd := exec.Command(pythonPath, scriptFile, pdfPath, outputFile)
-	hideWindowOnWindows(cmd) // Hide console window on Windows
-	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return nil, fmt.Errorf("extraction failed: %v\nOutput: %s", err, string(output))
-	}
-
-	fmt.Printf("Extract output: %s\n", string(output))
-
-	// Read extracted blocks
-	data, err := os.ReadFile(outputFile)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read extracted blocks: %w", err)
-	}
-
-	var blocks []PyExtractedBlock
-	if err := json.Unmarshal(data, &blocks); err != nil {
-		return nil, fmt.Errorf("failed to parse extracted blocks: %w", err)
-	}
-
-	logger.Info("extracted blocks with Python", logger.Int("count", len(blocks)))
-	return blocks, nil
-}
-
-// WriteTranslationsWithPython writes translated blocks to PDF using Python PyMuPDF
-func (t *BabelDocTranslator) WriteTranslationsWithPython(inputPDF string, blocks []PyExtractedBlock, outputPDF string) error {
-	logger.Info("writing translations with Python",
-		logger.String("input", inputPDF),
-		logger.String("output", outputPDF),
-		logger.Int("blocks", len(blocks)))
-
-	// Ensure Python environment
-	if err := python.EnsureGlobalEnv(nil); err != nil {
-		return fmt.Errorf("failed to setup Python: %w", err)
-	}
-
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python not ready")
-	}
-
-	// Write embedded script to temp file
-	scriptFile := filepath.Join(t.workDir, "write_translations.py")
-	if err := os.WriteFile(scriptFile, []byte(WriteTranslationsPyScript), 0644); err != nil {
-		return fmt.Errorf("failed to write script: %w", err)
-	}
-
-	// Write blocks to temp JSON
-	blocksFile := filepath.Join(t.workDir, "translated_blocks.json")
-	data, err := json.MarshalIndent(blocks, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal blocks: %w", err)
-	}
-	if err := os.WriteFile(blocksFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write blocks file: %w", err)
-	}
-
-	// Create output directory
-	outputDir := filepath.Dir(outputPDF)
-	if outputDir != "" && outputDir != "." {
-		os.MkdirAll(outputDir, 0755)
-	}
-
-	// Run write script
-	cmd := exec.Command(pythonPath, scriptFile, inputPDF, blocksFile, outputPDF)
-	hideWindowOnWindows(cmd) // Hide console window on Windows
-	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("write failed: %v\nOutput: %s", err, string(output))
-	}
-
-	fmt.Printf("Write output: %s\n", string(output))
-
-	// Verify output
-	if _, err := os.Stat(outputPDF); err != nil {
-		return fmt.Errorf("output PDF not created")
-	}
-
-	return nil
-}
-
-// TranslatePDFWithPython translates a PDF using Python script that does everything in one pass.
-// This is the recommended method as it uses PyMuPDF for both extraction and overlay,
-// ensuring consistent text matching and font rendering.
-//
-// Parameters:
-//   - inputPath: Path to the input PDF file
-//   - outputPath: Path to the output translated PDF file
-//   - apiKey: OpenAI API key
-//   - baseURL: OpenAI API base URL
-//   - model: Model name to use for translation
-//   - cachePath: Optional path to cache file (can be empty)
-//   - progressCallback: Optional callback for progress updates
-//
-// Returns error if translation fails.
-func (t *BabelDocTranslator) TranslatePDFWithPython(inputPath, outputPath, apiKey, baseURL, model, cachePath string, progressCallback func(message string)) error {
-	logger.Info("starting Python-based PDF translation",
-		logger.String("input", inputPath),
-		logger.String("output", outputPath))
-
-	// Validate inputs
-	if inputPath == "" || outputPath == "" {
-		return NewPDFError(ErrGenerateFailed, "input and output paths are required", nil)
-	}
-
-	if _, err := os.Stat(inputPath); err != nil {
-		return NewPDFError(ErrPDFNotFound, "input PDF not found", err)
-	}
-
-	if apiKey == "" {
-		return NewPDFError(ErrGenerateFailed, "API key is required", nil)
-	}
-
-	// Ensure Python environment is set up
-	if progressCallback != nil {
-		progressCallback("正在检查 Python 环境...")
-	}
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		if progressCallback != nil {
-			progressCallback(msg)
-		}
-	}); err != nil {
-		return fmt.Errorf("failed to setup Python environment: %w", err)
-	}
-
-	// Get Python path
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python environment not ready")
-	}
-
-	// Find Python script
-	possiblePaths := []string{
-		filepath.Join("internal", "pdf", "translate_pdf.py"),
-		filepath.Join("scripts", "pdf_translate.py"),
-	}
-
-	// Also check relative to executable
-	if exePath, err := os.Executable(); err == nil {
-		exeDir := filepath.Dir(exePath)
-		possiblePaths = append(possiblePaths,
-			filepath.Join(exeDir, "internal", "pdf", "translate_pdf.py"),
-			filepath.Join(exeDir, "scripts", "pdf_translate.py"),
-		)
-	}
-
-	scriptPath := ""
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			scriptPath = path
-			break
-		}
-	}
-
-	if scriptPath == "" {
-		return fmt.Errorf("Python translate script not found")
-	}
-
-	// Create output directory
-	outputDir := filepath.Dir(outputPath)
-	if outputDir != "" && outputDir != "." {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return NewPDFError(ErrGenerateFailed, "cannot create output directory", err)
-		}
-	}
-
-	// Set default cache path if not provided
-	if cachePath == "" {
-		cachePath = filepath.Join(t.workDir, "pdf_translation_cache.json")
-	}
-
-	// Build command
-	args := []string{scriptPath, inputPath, outputPath, cachePath}
-	cmd := exec.Command(pythonPath, args...)
-
-	// Set environment variables for API credentials
-	cmd.Env = append(os.Environ(),
-		"OPENAI_API_KEY="+apiKey,
-		"OPENAI_BASE_URL="+baseURL,
-		"OPENAI_MODEL="+model,
-	)
-
-	if progressCallback != nil {
-		progressCallback("正在翻译 PDF...")
-	}
-
-	// Run the script
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Python translation failed: %v\nOutput: %s", err, string(output))
-	}
-
-	fmt.Printf("Python translation output:\n%s\n", string(output))
-
-	// Verify output file exists
-	if _, err := os.Stat(outputPath); err != nil {
-		return fmt.Errorf("output PDF not created")
-	}
-
-	if progressCallback != nil {
-		progressCallback("翻译完成")
-	}
-
-	logger.Info("Python-based PDF translation completed",
-		logger.String("output", outputPath))
-
-	return nil
-}
-
-// TranslatePDFWithPdf2zh translates a PDF using pdf2zh (PDFMathTranslate).
-// This provides professional-grade PDF translation with formula preservation.
-//
-// Parameters:
-//   - inputPath: Path to the input PDF file
-//   - outputPath: Path to the output translated PDF file
-//   - apiKey: OpenAI API key
-//   - baseURL: OpenAI API base URL
-//   - model: Model name to use for translation
-//   - progressCallback: Optional callback for progress updates
-//
-// Returns error if translation fails.
-func (t *BabelDocTranslator) TranslatePDFWithPdf2zh(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string)) error {
-	logger.Info("starting pdf2zh PDF translation",
-		logger.String("input", inputPath),
-		logger.String("output", outputPath))
-
-	// Validate inputs
-	if inputPath == "" || outputPath == "" {
-		return NewPDFError(ErrGenerateFailed, "input and output paths are required", nil)
-	}
-
-	if _, err := os.Stat(inputPath); err != nil {
-		return NewPDFError(ErrPDFNotFound, "input PDF not found", err)
-	}
-
-	// Ensure Python environment is set up
-	if progressCallback != nil {
-		progressCallback("正在检查 Python 环境...")
-	}
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		if progressCallback != nil {
-			progressCallback(msg)
-		}
-	}); err != nil {
-		return fmt.Errorf("failed to setup Python environment: %w", err)
-	}
-
-	// Get Python path
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python environment not ready")
-	}
-
-	// Write embedded script to temp file
-	scriptFile := filepath.Join(t.workDir, "pdf2zh_translate.py")
-	if err := os.WriteFile(scriptFile, []byte(Pdf2zhTranslateScript), 0644); err != nil {
-		return fmt.Errorf("failed to write script: %w", err)
-	}
-
-	// Create output directory
-	outputDir := filepath.Dir(outputPath)
-	if outputDir != "" && outputDir != "." {
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return NewPDFError(ErrGenerateFailed, "cannot create output directory", err)
-		}
-	}
-
-	// Build command - use openai service
-	args := []string{scriptFile, inputPath, outputPath, "openai"}
-	cmd := exec.Command(pythonPath, args...)
-	hideWindowOnWindows(cmd)
-
-	// Set environment variables for API credentials
-	cmd.Env = append(os.Environ(),
-		"OPENAI_API_KEY="+apiKey,
-		"OPENAI_BASE_URL="+baseURL,
-		"OPENAI_MODEL="+model,
-	)
-
-	if progressCallback != nil {
-		progressCallback("正在使用 pdf2zh 翻译 PDF...")
-	}
-
-	// Run the script
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("pdf2zh translation failed: %v\nOutput: %s", err, string(output))
-	}
-
-	fmt.Printf("pdf2zh output:\n%s\n", string(output))
-
-	// Verify output file exists
-	if _, err := os.Stat(outputPath); err != nil {
-		return fmt.Errorf("output PDF not created")
-	}
-
-	if progressCallback != nil {
-		progressCallback("翻译完成")
-	}
-
-	logger.Info("pdf2zh PDF translation completed",
-		logger.String("output", outputPath))
-
-	return nil
-}
-
 // PageCompleteCallback is called when a page translation is complete
 type PageCompleteCallback func(currentPage, totalPages int, outputPath string)
 
-// TranslatePDFWithPyMuPDF translates a PDF using PyMuPDF.
-// This does extraction, translation, and overlay all in Python for consistency.
-// Supports progressive display - calls pageCallback after each page is translated.
-func (t *BabelDocTranslator) TranslatePDFWithPyMuPDF(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string)) error {
-	return t.TranslatePDFWithPyMuPDFProgressive(inputPath, outputPath, apiKey, baseURL, model, progressCallback, nil)
+// TranslatePDFWithGoPDF2 translates a PDF using pure Go (GoPDF2).
+// Extract text → translate via API → overlay with GoPDF2.
+func (t *BabelDocTranslator) TranslatePDFWithGoPDF2(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string)) error {
+	return t.TranslatePDFWithGoPDF2Progressive(inputPath, outputPath, apiKey, baseURL, model, progressCallback, nil)
 }
 
-// TranslatePDFWithPyMuPDFProgressive translates a PDF with progressive page updates.
+// TranslatePDFWithPyMuPDF is an alias for TranslatePDFWithGoPDF2 (kept for backward compatibility).
+func (t *BabelDocTranslator) TranslatePDFWithPyMuPDF(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string)) error {
+	return t.TranslatePDFWithGoPDF2(inputPath, outputPath, apiKey, baseURL, model, progressCallback)
+}
+
+// TranslatePDFWithPyMuPDFProgressive is an alias for TranslatePDFWithGoPDF2Progressive (kept for backward compatibility).
 func (t *BabelDocTranslator) TranslatePDFWithPyMuPDFProgressive(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string), pageCallback PageCompleteCallback) error {
-	logger.Info("starting PyMuPDF PDF translation",
+	return t.TranslatePDFWithGoPDF2Progressive(inputPath, outputPath, apiKey, baseURL, model, progressCallback, pageCallback)
+}
+
+// TranslatePDFWithGoPDF2Progressive translates a PDF with progressive page updates.
+// Pure Go implementation: extract text → translate via API → overlay with GoPDF2.
+func (t *BabelDocTranslator) TranslatePDFWithGoPDF2Progressive(inputPath, outputPath, apiKey, baseURL, model string, progressCallback func(message string), pageCallback PageCompleteCallback) error {
+	logger.Info("starting Go PDF translation",
 		logger.String("input", inputPath),
 		logger.String("output", outputPath))
 
@@ -1521,166 +1232,190 @@ func (t *BabelDocTranslator) TranslatePDFWithPyMuPDFProgressive(inputPath, outpu
 		return NewPDFError(ErrGenerateFailed, "API key is required", nil)
 	}
 
-	// Ensure Python environment
-	if progressCallback != nil {
-		progressCallback("正在检查 Python 环境...")
-	}
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		if progressCallback != nil {
-			progressCallback(msg)
-		}
-	}); err != nil {
-		return fmt.Errorf("failed to setup Python: %w", err)
-	}
-
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python not ready")
-	}
-
-	// Write script to temp file
-	scriptFile := filepath.Join(t.workDir, "pymupdf_translate.py")
-	if err := os.WriteFile(scriptFile, []byte(PyMuPDFTranslateScript), 0644); err != nil {
-		return fmt.Errorf("failed to write script: %w", err)
-	}
-
 	// Create output directory
 	outputDir := filepath.Dir(outputPath)
 	if outputDir != "" && outputDir != "." {
 		os.MkdirAll(outputDir, 0755)
 	}
 
-	// Cache path
+	// Phase 1: Extract text blocks using Go
+	if progressCallback != nil {
+		progressCallback("正在提取文本...")
+	}
+
+	blocks, err := t.ExtractBlocks(inputPath)
+	if err != nil {
+		return fmt.Errorf("text extraction failed: %w", err)
+	}
+
+	// Filter translatable blocks
+	translatableBlocks := FilterTranslatableBlocks(blocks)
+	totalBlocks := len(translatableBlocks)
+
+	logger.Info("extracted blocks",
+		logger.Int("total", len(blocks)),
+		logger.Int("translatable", totalBlocks))
+
+	if totalBlocks == 0 {
+		// No translatable blocks, just copy original
+		if progressCallback != nil {
+			progressCallback("没有可翻译的文本块，复制原始文件...")
+		}
+		return t.copyFile(inputPath, outputPath)
+	}
+
+	// Get total pages for progress reporting
+	totalPages, _ := t.GetPDFPageCount(inputPath)
+	if totalPages <= 0 {
+		totalPages = 1
+	}
+
+	// Phase 2: Translate text blocks using Go BatchTranslator
+	if progressCallback != nil {
+		progressCallback("正在翻译文本...")
+	}
+
+	batchTranslator := NewBatchTranslator(BatchTranslatorConfig{
+		APIKey:        apiKey,
+		BaseURL:       baseURL,
+		Model:         model,
+		ContextWindow: DefaultContextWindow,
+		Concurrency:   DefaultConcurrency,
+	})
+
+	// Load cache
 	cachePath := filepath.Join(t.workDir, "translation_cache.json")
+	cache := NewTranslationCache(cachePath)
+	if err := cache.Load(); err != nil {
+		logger.Warn("failed to load cache", logger.Err(err))
+	}
 
-	// Build command
-	cmd := exec.Command(pythonPath, scriptFile, inputPath, outputPath, cachePath)
-	hideWindowOnWindows(cmd)
+	// Convert to TextBlock for batch translator
+	var textBlocks []TextBlock
+	for _, b := range translatableBlocks {
+		textBlocks = append(textBlocks, TextBlock{
+			ID:        b.ID,
+			Page:      b.Page,
+			Text:      b.Text,
+			X:         b.X,
+			Y:         b.Y,
+			Width:     b.Width,
+			Height:    b.Height,
+			FontSize:  b.FontSize,
+			FontName:  b.FontName,
+			IsBold:    b.IsBold,
+			IsItalic:  b.IsItalic,
+			BlockType: b.BlockType,
+		})
+	}
 
-	// Get model path for layout detection
-	modelPath := python.GetModelPath()
+	// Check cache and separate cached vs uncached
+	var uncachedBlocks []TextBlock
+	translations := make(map[string]string)
+	cachedCount := 0
 
-	cmd.Env = append(os.Environ(),
-		"OPENAI_API_KEY="+apiKey,
-		"OPENAI_BASE_URL="+baseURL,
-		"OPENAI_MODEL="+model,
-		"DOCLAYOUT_MODEL_PATH="+modelPath,
-	)
+	for _, tb := range textBlocks {
+		if cached, ok := cache.Get(tb.Text); ok && cached != "" {
+			translations[tb.ID] = cached
+			cachedCount++
+		} else {
+			uncachedBlocks = append(uncachedBlocks, tb)
+		}
+	}
 
 	if progressCallback != nil {
-		progressCallback("正在翻译 PDF...")
+		progressCallback(fmt.Sprintf("缓存命中 %d/%d 块，需翻译 %d 块...", cachedCount, totalBlocks, len(uncachedBlocks)))
 	}
 
-	// Use real-time output parsing for progressive display
-	return t.runWithProgressiveOutput(cmd, outputPath, progressCallback, pageCallback)
-}
-
-// runWithProgressiveOutput runs the command and parses output for page completion events in real-time
-func (t *BabelDocTranslator) runWithProgressiveOutput(cmd *exec.Cmd, outputPath string, progressCallback func(message string), pageCallback PageCompleteCallback) error {
-	// Create pipes for stdout and stderr
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start command: %w", err)
-	}
-
-	// Read output in goroutines
-	var outputLines []string
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Process stdout
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stdout)
-		// Increase buffer size for long lines
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-		
-		for scanner.Scan() {
-			line := scanner.Text()
-			mu.Lock()
-			outputLines = append(outputLines, line)
-			mu.Unlock()
-
-			// Check for page completion marker
-			if strings.HasPrefix(line, "PAGE_COMPLETE:") {
-				parts := strings.Split(line, ":")
-				if len(parts) >= 3 {
-					currentPage := 0
-					totalPages := 0
-					fmt.Sscanf(parts[1], "%d", &currentPage)
-					fmt.Sscanf(parts[2], "%d", &totalPages)
-					
-					if currentPage > 0 && totalPages > 0 {
-						if progressCallback != nil {
-							progressCallback(fmt.Sprintf("已翻译 %d/%d 页", currentPage, totalPages))
-						}
-						if pageCallback != nil {
-							pageCallback(currentPage, totalPages, outputPath)
-						}
-					}
+	// Translate uncached blocks
+	if len(uncachedBlocks) > 0 {
+		translated, err := batchTranslator.TranslateWithRetryAndProgress(uncachedBlocks, DefaultMaxRetries, func(completed, total int) {
+			if progressCallback != nil {
+				progressCallback(fmt.Sprintf("正在翻译... (%d/%d)", completed+cachedCount, totalBlocks))
+			}
+			// Report page progress
+			if pageCallback != nil && totalPages > 0 {
+				// Estimate current page based on progress
+				currentPage := (completed + cachedCount) * totalPages / totalBlocks
+				if currentPage < 1 {
+					currentPage = 1
 				}
-			} else {
-				fmt.Println(line)
+				if currentPage > totalPages {
+					currentPage = totalPages
+				}
+				pageCallback(currentPage, totalPages, outputPath)
+			}
+		})
+		if err != nil {
+			logger.Warn("batch translation had errors", logger.Err(err))
+		}
+
+		for _, tb := range translated {
+			if tb.TranslatedText != "" {
+				translations[tb.ID] = tb.TranslatedText
+				cache.Set(tb.Text, tb.TranslatedText)
 			}
 		}
-		if err := scanner.Err(); err != nil {
-			fmt.Printf("stdout scanner error: %v\n", err)
-		}
-	}()
-
-	// Process stderr
-	go func() {
-		defer wg.Done()
-		scanner := bufio.NewScanner(stderr)
-		buf := make([]byte, 0, 64*1024)
-		scanner.Buffer(buf, 1024*1024)
-		
-		for scanner.Scan() {
-			line := scanner.Text()
-			mu.Lock()
-			outputLines = append(outputLines, "[stderr] "+line)
-			mu.Unlock()
-			fmt.Println("[stderr]", line)
-		}
-		if err := scanner.Err(); err != nil {
-			fmt.Printf("stderr scanner error: %v\n", err)
-		}
-	}()
-
-	// Wait for both goroutines to finish reading
-	wg.Wait()
-
-	// Wait for command to complete
-	err = cmd.Wait()
-
-	if err != nil {
-		mu.Lock()
-		output := strings.Join(outputLines, "\n")
-		mu.Unlock()
-		return fmt.Errorf("translation failed: %v\nOutput: %s", err, output)
 	}
 
-	if _, err := os.Stat(outputPath); err != nil {
-		mu.Lock()
-		output := strings.Join(outputLines, "\n")
-		mu.Unlock()
-		return fmt.Errorf("output PDF not created\nOutput: %s", output)
+	// Save cache
+	if err := cache.Save(); err != nil {
+		logger.Warn("failed to save cache", logger.Err(err))
+	}
+
+	// Phase 3: Generate translated PDF using GoPDF2
+	if progressCallback != nil {
+		progressCallback("正在生成翻译后的 PDF...")
+	}
+
+	// Convert to TranslatedBlock for GoPDF2
+	var translatedBlocks []TranslatedBlock
+	for _, b := range translatableBlocks {
+		translatedText, ok := translations[b.ID]
+		if !ok || translatedText == "" {
+			continue
+		}
+		translatedBlocks = append(translatedBlocks, TranslatedBlock{
+			TextBlock: TextBlock{
+				ID:        b.ID,
+				Page:      b.Page,
+				Text:      b.Text,
+				X:         b.X,
+				Y:         b.Y,
+				Width:     b.Width,
+				Height:    b.Height,
+				FontSize:  b.FontSize,
+				FontName:  b.FontName,
+				IsBold:    b.IsBold,
+				IsItalic:  b.IsItalic,
+				BlockType: b.BlockType,
+			},
+			TranslatedText: translatedText,
+		})
+	}
+
+	gen := NewGoPDF2Generator(t.workDir)
+	if t.fontPath != "" {
+		gen.fontPath = t.fontPath
+	}
+
+	if err := gen.GenerateTranslatedPDF(inputPath, translatedBlocks, outputPath); err != nil {
+		return fmt.Errorf("PDF generation failed: %w", err)
+	}
+
+	// Final page callback
+	if pageCallback != nil {
+		pageCallback(totalPages, totalPages, outputPath)
 	}
 
 	if progressCallback != nil {
 		progressCallback("翻译完成")
 	}
+
+	logger.Info("Go PDF translation completed",
+		logger.String("output", outputPath),
+		logger.Int("translated", len(translatedBlocks)),
+		logger.Int("cached", cachedCount))
 
 	return nil
 }

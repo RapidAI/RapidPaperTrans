@@ -89,7 +89,7 @@ type TranslateResult struct {
 
 // TranslatePDF translates a PDF file using BabelDOC approach.
 // This is the main entry point for PDF translation.
-// Flow: Python extract → Go translate → Python write
+// Flow: Go extract → Go translate → GoPDF2 overlay
 func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progressCallback func(phase string, progress int)) (*TranslateResult, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -103,27 +103,23 @@ func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progr
 		return nil, fmt.Errorf("API configuration is required for PDF translation")
 	}
 
-	// Phase 1: Python extracts text blocks
+	// Phase 1: Go extracts text blocks
 	if progressCallback != nil {
 		progressCallback("extracting", 10)
 	}
-	fmt.Println("Phase 1: Python 提取文本...")
+	fmt.Println("Phase 1: Go 提取文本...")
 
-	pyBlocks, err := t.translator.ExtractTextWithPython(inputPath)
+	blocks, err := t.translator.ExtractBlocks(inputPath)
 	if err != nil {
-		return nil, fmt.Errorf("Python extraction failed: %w", err)
+		return nil, fmt.Errorf("text extraction failed: %w", err)
 	}
 
-	logger.Info("extracted blocks", logger.Int("count", len(pyBlocks)))
+	// Filter translatable blocks
+	translatableBlocks := FilterTranslatableBlocks(blocks)
+	translatableCount := len(translatableBlocks)
 
-	// Count translatable blocks
-	translatableCount := 0
-	for _, b := range pyBlocks {
-		if b.Translatable {
-			translatableCount++
-		}
-	}
-	fmt.Printf("Total blocks: %d, Translatable: %d\n", len(pyBlocks), translatableCount)
+	logger.Info("extracted blocks", logger.Int("count", len(blocks)))
+	fmt.Printf("Total blocks: %d, Translatable: %d\n", len(blocks), translatableCount)
 
 	// Phase 2: Go translates text blocks
 	if progressCallback != nil {
@@ -137,19 +133,16 @@ func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progr
 	}
 
 	// Translate blocks
+	translations := make(map[string]string)
 	translatedCount := 0
 	cachedCount := 0
-	
-	for i := range pyBlocks {
-		if !pyBlocks[i].Translatable {
-			continue
-		}
 
-		text := pyBlocks[i].Text
+	for _, block := range translatableBlocks {
+		text := block.Text
 
 		// Check cache first
 		if cached, ok := t.cache.Get(text); ok && cached != "" {
-			pyBlocks[i].TranslatedText = cached
+			translations[block.ID] = cached
 			cachedCount++
 			translatedCount++
 			continue
@@ -157,27 +150,26 @@ func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progr
 
 		// Translate via API
 		if t.batchTranslator != nil {
-			// Create a single-block slice for translation
 			textBlock := TextBlock{
-				ID:   pyBlocks[i].ID,
+				ID:   block.ID,
 				Text: text,
 			}
-			
+
 			translated, err := t.batchTranslator.TranslateBatch([]TextBlock{textBlock})
 			if err != nil {
-				logger.Warn("translation failed for block", logger.String("id", pyBlocks[i].ID), logger.Err(err))
+				logger.Warn("translation failed for block", logger.String("id", block.ID), logger.Err(err))
 				continue
 			}
-			
+
 			if len(translated) > 0 && translated[0].TranslatedText != "" {
-				pyBlocks[i].TranslatedText = translated[0].TranslatedText
+				translations[block.ID] = translated[0].TranslatedText
 				t.cache.Set(text, translated[0].TranslatedText)
 				translatedCount++
 			}
 		}
 
 		// Update progress
-		if progressCallback != nil {
+		if progressCallback != nil && translatableCount > 0 {
 			progress := 20 + (translatedCount * 60 / translatableCount)
 			progressCallback("translating", progress)
 		}
@@ -190,14 +182,27 @@ func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progr
 
 	fmt.Printf("Translated: %d, From cache: %d\n", translatedCount, cachedCount)
 
-	// Phase 3: Python writes translations
+	// Phase 3: GoPDF2 writes translations
 	if progressCallback != nil {
 		progressCallback("generating", 85)
 	}
-	fmt.Println("Phase 3: Python 写入翻译...")
+	fmt.Println("Phase 3: GoPDF2 生成翻译PDF...")
 
-	if err := t.translator.WriteTranslationsWithPython(inputPath, pyBlocks, outputPath); err != nil {
-		return nil, fmt.Errorf("Python write failed: %w", err)
+	// Convert to TranslatedBabelDocBlock for GenerateTranslatedPDF
+	var translatedBabelBlocks []TranslatedBabelDocBlock
+	for _, block := range translatableBlocks {
+		translatedText, ok := translations[block.ID]
+		if !ok || translatedText == "" {
+			continue
+		}
+		translatedBabelBlocks = append(translatedBabelBlocks, TranslatedBabelDocBlock{
+			BabelDocBlock:  block,
+			TranslatedText: translatedText,
+		})
+	}
+
+	if err := t.translator.GenerateTranslatedPDF(inputPath, translatedBabelBlocks, outputPath); err != nil {
+		return nil, fmt.Errorf("PDF generation failed: %w", err)
 	}
 
 	if progressCallback != nil {
@@ -207,10 +212,10 @@ func (t *BabelDocPDFTranslator) TranslatePDF(inputPath, outputPath string, progr
 	result := &TranslateResult{
 		InputPath:        inputPath,
 		OutputPath:       outputPath,
-		TotalBlocks:      len(pyBlocks),
+		TotalBlocks:      len(blocks),
 		TranslatedBlocks: translatedCount - cachedCount,
 		CachedBlocks:     cachedCount,
-		FormulaBlocks:    len(pyBlocks) - translatableCount,
+		FormulaBlocks:    len(blocks) - translatableCount,
 	}
 
 	logger.Info("BabelDOC translation complete",

@@ -32,20 +32,19 @@ func NewPostProcessor(confThreshold, nmsThreshold float64) *PostProcessor {
 	}
 }
 
-// getDocLayoutClassNames returns the class names for DocLayout-YOLO
+// getDocLayoutClassNames returns the class names for DocLayout-YOLO DocStructBench model (10 classes)
 func getDocLayoutClassNames() []ElementType {
 	return []ElementType{
-		ElementText,          // 0
-		ElementTitle,         // 1
-		ElementPicture,       // 2
-		ElementCaption,       // 3
-		ElementSectionHeader, // 4
-		ElementFootnote,      // 5
-		ElementFormula,       // 6
-		ElementTable,         // 7
-		ElementListItem,      // 8
-		ElementPageHeader,    // 9
-		ElementPageFooter,    // 10
+		ElementTitle,     // 0: title
+		ElementText,      // 1: plain text
+		ElementPageFooter,// 2: abandon (non-translatable)
+		ElementPicture,   // 3: figure
+		ElementCaption,   // 4: figure_caption
+		ElementTable,     // 5: table
+		ElementCaption,   // 6: table_caption
+		ElementFootnote,  // 7: table_footnote
+		ElementFormula,   // 8: isolate_formula
+		ElementCaption,   // 9: formula_caption
 	}
 }
 

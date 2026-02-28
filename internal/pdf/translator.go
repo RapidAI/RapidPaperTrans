@@ -169,7 +169,7 @@ func (p *PDFTranslator) LoadPDF(filePath string) (*PDFInfo, error) {
 // TranslatePDF 翻译 PDF 内容
 // Requirements: 3.5 - 显示翻译进度（已完成块数/总块数）
 // Property 7: 状态有效性 - PDFStatus的Phase应是有效枚举值，Progress在0-100范围内
-// Uses PyMuPDF for extraction and overlay with progressive page display
+// Uses GoPDF2 for extraction and overlay with progressive page display
 func (p *PDFTranslator) TranslatePDF() (*TranslationResult, error) {
 	p.mu.Lock()
 
@@ -194,7 +194,7 @@ func (p *PDFTranslator) TranslatePDF() (*TranslationResult, error) {
 	outputPath := p.generator.GetOutputPath(p.currentFile)
 	babelTranslator := NewBabelDocTranslator(BabelDocConfig{WorkDir: p.workDir})
 
-	// Use PyMuPDF-based translation with progressive page updates
+	// Use go-fitz-based translation with progressive page updates
 	err := babelTranslator.TranslatePDFWithPyMuPDFProgressive(
 		p.currentFile,
 		outputPath,

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 
 	"latex-translator/internal/pdf"
-	"latex-translator/internal/python"
 )
 
 func main() {
@@ -31,16 +30,6 @@ func main() {
 
 	fmt.Printf("API: %s\n", baseURL)
 	fmt.Printf("Model: %s\n", model)
-
-	// Setup Python environment
-	fmt.Println("\n=== Setting up Python environment ===")
-	err := python.EnsureGlobalEnv(func(msg string) {
-		fmt.Printf("  %s\n", msg)
-	})
-	if err != nil {
-		fmt.Printf("Error setting up Python: %v\n", err)
-		os.Exit(1)
-	}
 
 	// Input/output paths
 	inputPDF := "testdata/2504.15895/original.pdf"

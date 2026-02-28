@@ -3,8 +3,7 @@ package pdf
 
 import (
 	"fmt"
-	"image"
-	"os"
+	_ "image/png" // register PNG decoder
 	"path/filepath"
 
 	"latex-translator/internal/logger"
@@ -12,11 +11,11 @@ import (
 
 // LayoutElement represents a detected element in the PDF layout
 type LayoutElement struct {
-	Type       ElementType `json:"type"`
+	Type        ElementType `json:"type"`
 	BoundingBox BoundingBox `json:"bounding_box"`
-	Confidence float64     `json:"confidence"`
-	Page       int         `json:"page"`
-	Content    string      `json:"content,omitempty"`
+	Confidence  float64     `json:"confidence"`
+	Page        int         `json:"page"`
+	Content     string      `json:"content,omitempty"`
 }
 
 // ElementType defines the type of layout element
@@ -44,28 +43,30 @@ type BoundingBox struct {
 	Height float64 `json:"height"`
 }
 
-// LayoutDetector handles AI-powered layout detection
+// LayoutDetector handles AI-powered layout detection using DocLayout-YOLO ONNX model
 type LayoutDetector struct {
-	modelPath   string
-	onnxSession interface{} // ONNX runtime session
-	enabled     bool
+	engine  *ONNXEngine
+	enabled bool
+	workDir string
 }
 
 // LayoutDetectorConfig holds configuration for layout detector
 type LayoutDetectorConfig struct {
-	ModelPath string
+	ModelPath string // unused now (model is embedded)
 	Enabled   bool
+	WorkDir   string
 }
 
-// NewLayoutDetector creates a new layout detector
+// NewLayoutDetector creates a new layout detector.
+// When Enabled=true, it initializes the ONNX runtime with the embedded DocLayout-YOLO model.
 func NewLayoutDetector(config LayoutDetectorConfig) (*LayoutDetector, error) {
 	detector := &LayoutDetector{
-		modelPath: config.ModelPath,
-		enabled:   config.Enabled,
+		enabled: config.Enabled,
+		workDir: config.WorkDir,
 	}
 
 	if config.Enabled {
-		if err := detector.loadModel(); err != nil {
+		if err := detector.init(); err != nil {
 			logger.Warn("failed to load layout detection model, falling back to rule-based detection",
 				logger.Err(err))
 			detector.enabled = false
@@ -75,77 +76,104 @@ func NewLayoutDetector(config LayoutDetectorConfig) (*LayoutDetector, error) {
 	return detector, nil
 }
 
-// loadModel loads the ONNX model for layout detection
-func (d *LayoutDetector) loadModel() error {
-	if d.modelPath == "" {
-		return fmt.Errorf("model path not specified")
+// init initializes the ONNX engine
+func (d *LayoutDetector) init() error {
+	workDir := d.workDir
+	if workDir == "" {
+		workDir = "."
 	}
 
-	// Check if model file exists
-	if _, err := os.Stat(d.modelPath); err != nil {
-		return fmt.Errorf("model file not found: %w", err)
+	engine := GetONNXEngine()
+	if err := engine.Initialize(workDir); err != nil {
+		return fmt.Errorf("ONNX engine init failed: %w", err)
 	}
+	d.engine = engine
 
-	// TODO: Initialize ONNX runtime session when onnxruntime-go is integrated
-	// For now, we'll use rule-based detection as fallback
-	logger.Info("layout detection model found (using rule-based detection for now)",
-		logger.String("path", d.modelPath))
-
+	logger.Info("layout detection model loaded via ONNX runtime")
 	return nil
 }
 
-// DetectLayout detects layout elements in a PDF page
+// Close releases resources
+func (d *LayoutDetector) Close() {
+	// Don't destroy the singleton engine here; it may be shared
+}
+
+// DetectLayout detects layout elements in a PDF page.
+// Uses ONNX model if enabled, otherwise falls back to rule-based heuristics.
 func (d *LayoutDetector) DetectLayout(pdfPath string, pageNum int) ([]LayoutElement, error) {
-	if !d.enabled {
+	if !d.enabled || d.engine == nil {
 		return d.detectLayoutRuleBased(pdfPath, pageNum)
 	}
-
 	return d.detectLayoutAI(pdfPath, pageNum)
 }
 
-// detectLayoutAI uses AI model to detect layout
+// detectLayoutAI uses the DocLayout-YOLO ONNX model
 func (d *LayoutDetector) detectLayoutAI(pdfPath string, pageNum int) ([]LayoutElement, error) {
 	logger.Info("detecting layout with AI model",
 		logger.String("pdf", filepath.Base(pdfPath)),
 		logger.Int("page", pageNum))
 
-	// TODO: Implement ONNX inference
-	// Steps:
-	// 1. Convert PDF page to image
-	// 2. Preprocess image (resize to 1024x1024)
-	// 3. Run ONNX inference
-	// 4. Post-process detections (NMS, confidence filtering)
-	// 5. Map detections to LayoutElements
+	// Convert PDF page to image using GoPDF2 (pure Go, no external deps)
+	img, err := ConvertPDFPageToImage(pdfPath, pageNum, 150)
+	if err != nil {
+		logger.Warn("PDF to image conversion failed, falling back to rule-based",
+			logger.Err(err))
+		return d.detectLayoutRuleBased(pdfPath, pageNum)
+	}
 
-	// For now, fall back to rule-based detection
-	return d.detectLayoutRuleBased(pdfPath, pageNum)
+	bounds := img.Bounds()
+	imgW := bounds.Dx()
+	imgH := bounds.Dy()
+
+	// Run ONNX inference
+	detections, err := d.engine.DetectLayoutFromImage(img, imgW, imgH)
+	if err != nil {
+		logger.Warn("ONNX inference failed, falling back to rule-based",
+			logger.Err(err))
+		return d.detectLayoutRuleBased(pdfPath, pageNum)
+	}
+
+	// Convert pixel-space detections to LayoutElements
+	var elements []LayoutElement
+	classNames := getDocLayoutClassNames()
+	for _, det := range detections {
+		elemType := ElementText
+		if det.ClassID >= 0 && det.ClassID < len(classNames) {
+			elemType = classNames[det.ClassID]
+		}
+		elements = append(elements, LayoutElement{
+			Type:       elemType,
+			BoundingBox: det.Box,
+			Confidence: det.Confidence,
+			Page:       pageNum,
+		})
+	}
+
+	logger.Info("AI layout detection complete",
+		logger.Int("detections", len(elements)),
+		logger.Int("page", pageNum))
+
+	return elements, nil
 }
 
-// detectLayoutRuleBased uses rule-based heuristics to detect layout
+// detectLayoutRuleBased uses rule-based heuristics (fallback)
 func (d *LayoutDetector) detectLayoutRuleBased(pdfPath string, pageNum int) ([]LayoutElement, error) {
 	logger.Info("detecting layout with rule-based method",
 		logger.String("pdf", filepath.Base(pdfPath)),
 		logger.Int("page", pageNum))
 
-	// Use existing parser to extract text blocks
 	parser := NewPDFParser("")
 	textBlocks, err := parser.ExtractText(pdfPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to extract text: %w", err)
 	}
 
-	// Filter blocks for the specific page
-	var pageBlocks []TextBlock
+	var elements []LayoutElement
 	for _, block := range textBlocks {
-		if block.Page == pageNum {
-			pageBlocks = append(pageBlocks, block)
+		if block.Page != pageNum {
+			continue
 		}
-	}
-
-	// Convert TextBlocks to LayoutElements
-	elements := make([]LayoutElement, len(pageBlocks))
-	for i, block := range pageBlocks {
-		elements[i] = LayoutElement{
+		elements = append(elements, LayoutElement{
 			Type: ElementType(block.BlockType),
 			BoundingBox: BoundingBox{
 				X:      block.X,
@@ -153,15 +181,14 @@ func (d *LayoutDetector) detectLayoutRuleBased(pdfPath string, pageNum int) ([]L
 				Width:  block.Width,
 				Height: block.Height,
 			},
-			Confidence: 1.0, // Rule-based has 100% confidence in its classification
+			Confidence: 1.0,
 			Page:       block.Page,
 			Content:    block.Text,
-		}
+		})
 	}
 
 	logger.Info("rule-based detection complete",
 		logger.Int("elements", len(elements)))
-
 	return elements, nil
 }
 
@@ -213,57 +240,8 @@ func (e *LayoutElement) ConvertToTextBlock(blockID string) TextBlock {
 	}
 }
 
-// PDFToImage converts a PDF page to an image for AI processing
-func PDFToImage(pdfPath string, pageNum int) (image.Image, error) {
-	// TODO: Implement PDF to image conversion
-	// Options:
-	// 1. Use pdfcpu to extract page as image
-	// 2. Use external tool like pdftoppm
-	// 3. Use ghostscript
-	return nil, fmt.Errorf("PDF to image conversion not yet implemented")
-}
-
-// PreprocessImage preprocesses an image for ONNX model input
-func PreprocessImage(img image.Image, targetSize int) ([]float32, error) {
-	// TODO: Implement image preprocessing
-	// Steps:
-	// 1. Resize to targetSize x targetSize
-	// 2. Normalize pixel values
-	// 3. Convert to CHW format (channels, height, width)
-	// 4. Return as float32 array
-	return nil, fmt.Errorf("image preprocessing not yet implemented")
-}
-
-// PostprocessDetections processes raw model output to LayoutElements
-func PostprocessDetections(rawOutput []float32, imgWidth, imgHeight int) ([]LayoutElement, error) {
-	// TODO: Implement post-processing
-	// Steps:
-	// 1. Parse YOLO output format
-	// 2. Apply NMS (Non-Maximum Suppression)
-	// 3. Filter by confidence threshold
-	// 4. Scale bounding boxes to original image size
-	// 5. Map class IDs to ElementTypes
-	return nil, fmt.Errorf("detection post-processing not yet implemented")
-}
-
-// DownloadModel downloads the DocLayout-YOLO model if not present
+// DownloadModel is a no-op since the model is embedded in the binary.
 func DownloadModel(modelPath string) error {
-	// Check if model already exists
-	if _, err := os.Stat(modelPath); err == nil {
-		logger.Info("model already exists", logger.String("path", modelPath))
-		return nil
-	}
-
-	// Create model directory
-	modelDir := filepath.Dir(modelPath)
-	if err := os.MkdirAll(modelDir, 0755); err != nil {
-		return fmt.Errorf("failed to create model directory: %w", err)
-	}
-
-	// TODO: Download model from HuggingFace
-	// Model URL: https://huggingface.co/wybxc/DocLayout-YOLO-DocStructBench-onnx
-	logger.Info("downloading layout detection model...",
-		logger.String("destination", modelPath))
-
-	return fmt.Errorf("model download not yet implemented")
+	logger.Info("model is embedded in binary, no download needed")
+	return nil
 }

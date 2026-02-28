@@ -3,7 +3,6 @@
 package pdf
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"strings"
 
 	"latex-translator/internal/logger"
-	"latex-translator/internal/python"
 
 	ledongthucpdf "github.com/ledongthuc/pdf"
 	"github.com/pdfcpu/pdfcpu/pkg/api"
@@ -91,22 +89,11 @@ func (g *PDFGenerator) GeneratePDF(originalPath string, blocks []TranslatedBlock
 		return nil
 	}
 
-	// 方案0: 优先使用 Go MuPDF 绑定（如果可用）
-	if IsMuPDFAvailable() {
-		fmt.Println("正在使用 Go MuPDF 绑定覆盖文本...")
-		mupdfGen := NewMuPDFGenerator(g.workDir)
-		if err := mupdfGen.GenerateTranslatedPDF(originalPath, blocks, outputPath); err != nil {
-			fmt.Printf("Warning: Go MuPDF failed: %v\n", err)
-		} else {
-			// MuPDF succeeded, skip other methods
-			goto verifyOutput
-		}
-	}
-
-	// 方案1: 使用 Python + PyMuPDF 方案
-	fmt.Println("正在使用 Python + PyMuPDF 方法覆盖文本...")
-	if err := g.generatePythonOverlayPDF(originalPath, blocks, outputPath); err != nil {
-		fmt.Printf("Warning: Python overlay failed: %v\n", err)
+	// 方案1: 优先使用 GoPDF2（支持 htmlinsert）
+	fmt.Println("正在使用 GoPDF2 方法覆盖文本...")
+	gopdf2Gen := NewGoPDF2Generator(g.workDir)
+	if err := gopdf2Gen.GenerateTranslatedPDF(originalPath, blocks, outputPath); err != nil {
+		fmt.Printf("Warning: GoPDF2 overlay failed: %v\n", err)
 		
 		// 方案2: 使用 Clean Overlay 方法（将PDF转为图像，移除文本层）
 		fmt.Println("Trying Clean Overlay method (converts PDF to image)...")
@@ -119,14 +106,11 @@ func (g *PDFGenerator) GeneratePDF(originalPath string, blocks []TranslatedBlock
 			if err := g.generateOverlayPDF(originalPath, blocks, outputPath); err != nil {
 				fmt.Printf("Warning: LaTeX overlay also failed: %v\n", err)
 				fmt.Println("Falling back to copying original PDF...")
-				fmt.Println("Note: Build with -tags mupdf, or install Python (PyMuPDF) or LaTeX (xelatex)")
-				fmt.Println("Install PyMuPDF: pip install PyMuPDF")
+				fmt.Println("Note: Install LaTeX (xelatex) for better PDF generation")
 				return g.copyFile(originalPath, outputPath)
 			}
 		}
 	}
-
-verifyOutput:
 
 	// Verify the output file was created and has content
 	fileInfo, err := os.Stat(outputPath)
@@ -2249,222 +2233,6 @@ func (g *PDFGenerator) getPDFPageCount(pdfPath string) (int, error) {
 		return 0, NewPDFError(ErrPDFInvalid, "无法读取PDF文件", err)
 	}
 	return ctx.PageCount, nil
-}
-
-// generatePythonOverlayPDF generates a PDF with Chinese text overlaid using Python
-// 使用 PyMuPDF 的 redaction 功能完全删除原文并添加翻译
-func (g *PDFGenerator) generatePythonOverlayPDF(originalPath string, blocks []TranslatedBlock, outputPath string) error {
-	// Ensure Python environment is set up with required packages
-	fmt.Println("正在检查 Python 环境...")
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		fmt.Println(msg)
-	}); err != nil {
-		return fmt.Errorf("failed to setup Python environment: %w", err)
-	}
-
-	// Get Python path from our managed environment
-	pythonPath := python.GetPythonPath()
-	if pythonPath == "" {
-		return fmt.Errorf("Python environment not ready")
-	}
-
-	// Find Python script - look in multiple possible locations
-	possiblePaths := []string{
-		filepath.Join("internal", "pdf", "overlay_pdf.py"),
-		filepath.Join("scripts", "pdf_translate.py"),
-		filepath.Join("latex-translator", "internal", "pdf", "overlay_pdf.py"),
-		filepath.Join("latex-translator", "scripts", "pdf_translate.py"),
-		filepath.Join("..", "..", "internal", "pdf", "overlay_pdf.py"),
-		filepath.Join("..", "..", "scripts", "pdf_translate.py"),
-	}
-	
-	scriptPath := ""
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			scriptPath = path
-			break
-		}
-	}
-	
-	if scriptPath == "" {
-		return fmt.Errorf("Python script not found in any of the expected locations")
-	}
-	
-	// Create blocks JSON file
-	blocksFile, err := g.createBlocksJSONFile(blocks)
-	if err != nil {
-		return fmt.Errorf("failed to create blocks JSON file: %v", err)
-	}
-	defer os.Remove(blocksFile)
-	
-	// Check which script we're using
-	isOverlayScript := strings.Contains(scriptPath, "overlay_pdf.py")
-	isPdfTranslateScript := strings.Contains(scriptPath, "pdf_translate.py")
-	
-	var cmd *exec.Cmd
-	if isOverlayScript {
-		// New overlay_pdf.py script - uses blocks JSON file directly
-		cmd = exec.Command(pythonPath, scriptPath, originalPath, blocksFile, outputPath)
-	} else if isPdfTranslateScript {
-		// pdf_translate.py - uses translation cache file
-		cacheFile, err := g.createTranslationCache(blocks)
-		if err != nil {
-			return fmt.Errorf("failed to create translation cache: %v", err)
-		}
-		defer os.Remove(cacheFile)
-		cmd = exec.Command(pythonPath, scriptPath, originalPath, cacheFile, outputPath)
-	} else {
-		// Fallback - try with blocks JSON
-		cmd = exec.Command(pythonPath, scriptPath, originalPath, blocksFile, outputPath)
-	}
-	
-	hideWindowOnWindows(cmd)
-	
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("Python overlay failed: %v\nOutput: %s", err, string(output))
-	}
-	
-	fmt.Printf("Python overlay output: %s\n", string(output))
-	return nil
-}
-
-// createBlocksJSONFile creates a temporary JSON file with block data
-func (g *PDFGenerator) createBlocksJSONFile(blocks []TranslatedBlock) (string, error) {
-	type BlockJSON struct {
-		Page           int     `json:"page"`
-		X              float64 `json:"x"`
-		Y              float64 `json:"y"`
-		Width          float64 `json:"width"`
-		Height         float64 `json:"height"`
-		FontSize       float64 `json:"font_size"`
-		BlockType      string  `json:"block_type"`
-		Text           string  `json:"text"`
-		TranslatedText string  `json:"translated_text"`
-	}
-	
-	jsonBlocks := make([]BlockJSON, 0, len(blocks))
-	for _, block := range blocks {
-		// Skip blocks without translation
-		if block.TranslatedText == "" {
-			continue
-		}
-		// Skip formula blocks - they should not be translated/overlaid
-		if block.BlockType == "formula" {
-			continue
-		}
-		jsonBlocks = append(jsonBlocks, BlockJSON{
-			Page:           block.Page,
-			X:              block.X,
-			Y:              block.Y,
-			Width:          block.Width,
-			Height:         block.Height,
-			FontSize:       block.FontSize,
-			BlockType:      block.BlockType,
-			Text:           block.Text,
-			TranslatedText: block.TranslatedText,
-		})
-	}
-	
-	// Create temp file
-	tmpFile, err := os.CreateTemp("", "blocks_*.json")
-	if err != nil {
-		return "", err
-	}
-	defer tmpFile.Close()
-	
-	encoder := json.NewEncoder(tmpFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(jsonBlocks); err != nil {
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-	
-	return tmpFile.Name(), nil
-}
-
-// createTranslationCache creates a temporary translation cache file from blocks
-func (g *PDFGenerator) createTranslationCache(blocks []TranslatedBlock) (string, error) {
-	type CacheEntry struct {
-		Original    string `json:"original"`
-		Translation string `json:"translation"`
-	}
-	
-	type Cache struct {
-		Version string       `json:"version"`
-		Entries []CacheEntry `json:"entries"`
-	}
-	
-	cache := Cache{
-		Version: "1.0",
-		Entries: make([]CacheEntry, 0, len(blocks)),
-	}
-	
-	for _, block := range blocks {
-		if block.TranslatedText == "" {
-			continue
-		}
-		// 移除空格以匹配 PDF 解析后的文本
-		original := strings.ReplaceAll(block.Text, " ", "")
-		cache.Entries = append(cache.Entries, CacheEntry{
-			Original:    original,
-			Translation: block.TranslatedText,
-		})
-	}
-	
-	// 创建临时文件
-	tmpFile, err := os.CreateTemp("", "translation_cache_*.json")
-	if err != nil {
-		return "", err
-	}
-	defer tmpFile.Close()
-	
-	encoder := json.NewEncoder(tmpFile)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(cache); err != nil {
-		os.Remove(tmpFile.Name())
-		return "", err
-	}
-	
-	return tmpFile.Name(), nil
-}
-
-// blocksToJSON converts translated blocks to JSON string
-func (g *PDFGenerator) blocksToJSON(blocks []TranslatedBlock) (string, error) {
-	type JSONBlock struct {
-		Page           int     `json:"page"`
-		Text           string  `json:"text"`
-		TranslatedText string  `json:"translated_text"`
-		X              float64 `json:"x"`
-		Y              float64 `json:"y"`
-		Width          float64 `json:"width"`
-		Height         float64 `json:"height"`
-		FontSize       float64 `json:"font_size"`
-	}
-	
-	jsonBlocks := make([]JSONBlock, 0, len(blocks))
-	for _, block := range blocks {
-		if block.TranslatedText == "" {
-			continue
-		}
-		jsonBlocks = append(jsonBlocks, JSONBlock{
-			Page:           block.Page,
-			Text:           block.Text,
-			TranslatedText: block.TranslatedText,
-			X:              block.X,
-			Y:              block.Y,
-			Width:          block.Width,
-			Height:         block.Height,
-			FontSize:       block.FontSize,
-		})
-	}
-	
-	data, err := json.Marshal(jsonBlocks)
-	if err != nil {
-		return "", err
-	}
-	
-	return string(data), nil
 }
 
 // GenerateImprovedOverlayLatexForTest is a test helper that exposes the LaTeX generation

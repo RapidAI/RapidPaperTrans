@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"latex-translator/internal/pdf"
-	"latex-translator/internal/python"
 )
 
 func main() {
@@ -24,15 +23,6 @@ func main() {
 
 	// Ensure output directory exists
 	os.MkdirAll(filepath.Dir(outputPDF), 0755)
-
-	// Setup Python environment
-	fmt.Println("Setting up Python environment...")
-	if err := python.EnsureGlobalEnv(func(msg string) {
-		fmt.Println("  ", msg)
-	}); err != nil {
-		fmt.Printf("Failed to setup Python: %v\n", err)
-		os.Exit(1)
-	}
 
 	// Create translator
 	workDir, _ := os.MkdirTemp("", "pdf-translate-test-*")

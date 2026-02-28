@@ -3,11 +3,13 @@ module latex-translator
 go 1.24.1
 
 require (
+	github.com/VantageDataChat/GoPDF2 v0.0.0-20260208041349-f381e427ff81
 	github.com/cloudwego/eino v0.7.26
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.8
 	github.com/ledongthuc/pdf v0.0.0-20250511090121-5959a4027728
 	github.com/pdfcpu/pdfcpu v0.11.1
 	github.com/wailsapp/wails/v2 v2.11.0
+	github.com/yalue/onnxruntime_go v1.25.0
 	golang.org/x/text v0.33.0
 )
 
@@ -51,6 +53,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/nikolalohinski/gonja v1.5.3 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.9 // indirect
+	github.com/phpdave11/gofpdi v1.0.14-0.20211212211723-1f10f9844311 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -65,6 +68,7 @@ require (
 	github.com/wailsapp/mimetype v1.4.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/yargevad/filepathx v1.0.0 // indirect
+	go.mozilla.org/pkcs7 v0.9.0 // indirect
 	golang.org/x/arch v0.11.0 // indirect
 	golang.org/x/crypto v0.47.0 // indirect
 	golang.org/x/exp v0.0.0-20230713183714-613f0c0eb8a1 // indirect

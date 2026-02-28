@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"latex-translator/internal/pdf"
-	"latex-translator/internal/python"
 )
 
 func main() {
@@ -19,19 +18,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("=== Testing PyMuPDF Translation ===")
+	fmt.Println("=== Testing GoPDF2 Translation ===")
 	fmt.Printf("Input: %s\n", inputPDF)
 	fmt.Printf("Output: %s\n", outputPDF)
-
-	// First ensure Python environment is ready
-	fmt.Println("\n1. Setting up Python environment...")
-	err := python.EnsureGlobalEnv(func(msg string) {
-		fmt.Println("  " + msg)
-	})
-	if err != nil {
-		fmt.Printf("Failed to setup Python: %v\n", err)
-		os.Exit(1)
-	}
 
 	// Create translator
 	translator := pdf.NewBabelDocTranslator(pdf.BabelDocConfig{
@@ -61,8 +50,8 @@ func main() {
 	fmt.Printf("  Model: %s\n", model)
 
 	// Run translation
-	fmt.Println("\n3. Starting PyMuPDF translation...")
-	err = translator.TranslatePDFWithPyMuPDF(
+	fmt.Println("\n3. Starting GoPDF2 translation...")
+	err := translator.TranslatePDFWithPyMuPDF(
 		inputPDF,
 		outputPDF,
 		apiKey,

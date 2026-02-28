@@ -34,10 +34,10 @@ func (r *PDFRebuilder) RebuildPDF(originalPath string, elements []LayoutElement,
 	// Create element-to-translation mapping
 	translationMap := r.createTranslationMap(elements, translatedBlocks)
 
-	// Generate rebuilt PDF using Python script (similar to overlay but full rebuild)
-	if err := r.rebuildWithPython(originalPath, elements, translationMap, outputPath); err != nil {
-		logger.Warn("Python rebuild failed, trying LaTeX method", logger.Err(err))
-		return r.rebuildWithLaTeX(originalPath, elements, translationMap, outputPath)
+	// Use LaTeX method for PDF rebuilding
+	if err := r.rebuildWithLaTeX(originalPath, elements, translationMap, outputPath); err != nil {
+		logger.Warn("LaTeX rebuild failed", logger.Err(err))
+		return err
 	}
 
 	return nil
@@ -53,19 +53,6 @@ func (r *PDFRebuilder) createTranslationMap(elements []LayoutElement, translated
 	}
 
 	return translationMap
-}
-
-// rebuildWithPython uses Python + PyMuPDF to rebuild the PDF
-func (r *PDFRebuilder) rebuildWithPython(originalPath string, elements []LayoutElement, translations map[string]string, outputPath string) error {
-	// TODO: Implement Python-based PDF rebuilding
-	// This is more sophisticated than overlay:
-	// 1. Extract all images and graphics from original
-	// 2. Create new PDF with same page sizes
-	// 3. Place images and graphics in original positions
-	// 4. Add translated text in appropriate positions
-	// 5. Preserve formulas as images or vector graphics
-
-	return fmt.Errorf("Python rebuild not yet implemented")
 }
 
 // rebuildWithLaTeX uses LaTeX to rebuild the PDF
